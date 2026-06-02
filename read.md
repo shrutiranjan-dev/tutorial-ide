@@ -1,0 +1,348 @@
+# Tutorial IDE Progress Memory
+
+This file is a backup context memory for the local `tutorial-ide` project. It records the current product direction, implemented architecture, major fixes, and prompt system so future work can resume without rediscovering everything.
+
+## Product Goal
+
+Tutorial IDE is a desktop learning IDE inspired by VS Code, focused on personal coding development. It uses:
+
+- Electron desktop shell.
+- React + TypeScript + Vite UI.
+- Monaco editor.
+- xterm.js terminal.
+- Local Ollama tutor through `http://localhost:11434`.
+- Node/Electron backend for files, generated lessons, terminal commands, progress, and Ollama requests.
+
+The app is for personal development first, not job/interview preparation unless the learner explicitly asks for that.
+
+## Current UX Shape
+
+The app has:
+
+- Left activity bar with Explorer, Lessons, Preview, Tutor, and Run icons.
+- Left sidebar with Learning Workspace, Create Roadmap interview, Roadmaps, Tutorial Parts, and Files.
+- Main editor workspace with Monaco tabs.
+- Preview view opened from the left nav. Preview hides tutor and bottom terminal panels.
+- Top actions: Save, Guide, Run, Check.
+- Guide is a right-side drawer/modal, not a permanent bottom panel.
+- Bottom panel is terminal-only.
+- Right tutor panel is visible in normal editor mode.
+- Neon separator rails replaced visible resize grip icons.
+- Sidebar lower panels were polished with VS Code-style empty states.
+
+## Important User Preferences
+
+- Beginner language learning must behave like a real 0-to-intermediate course.
+- W3Schools-style tutorial order is the reference for beginner tracks.
+- Do not copy W3Schools text, examples, wording, or exercises.
+- Do not ask useless/project-heavy interview questions for beginners.
+- If learner says "need to learn Python/JavaScript/etc.", keep it fundamentals-focused.
+- Do not suggest REST APIs, apps, automation, jobs, interviews, freelancing, portfolio, or frameworks unless explicitly requested.
+- Lessons must be separate, clear, runnable/checkable, and not repeated copies of the same exercise.
+
+## Data Locations
+
+App-generated user data lives under Electron userData:
+
+- `roadmaps.json`
+- `progress.json`
+- `progress-events.json`
+- `generated-lessons/`
+- `lesson-workspaces/`
+
+Generated lessons use `lesson.json` plus a `starter/` folder.
+
+## Backend Highlights
+
+Main backend file: `electron/main.cjs`.
+
+Important functions/constants:
+
+- `agentPrompts`: stores the full prompt system.
+- `w3schoolsTrackRegistry`: supported tutorial tracks and source URLs.
+- `matchW3SchoolsTrack(answers)`: detects requested supported track.
+- `closestW3SchoolsTracks(answers)`: suggestions for unsupported/uncertain tracks.
+- `learningTimePlan(depth)`: converts time/depth answers into pace, target weeks, max lessons, estimated minutes.
+- `shouldForceLocalInterviewPrompt(field, answers)`: forces safe local prompts for beginner language courses.
+- `validateBeginnerInterviewQuestion(prompt, transcript)`: prevents unsafe Ollama interview questions reaching UI.
+- `buildW3SchoolsCourseMilestones(answers, skillGap, capstone)`: creates catalog-first W3Schools-style roadmap modules.
+- `normalizeRoadmapPlan(...)`: builds roadmap object with course metadata.
+- `createGeneratedLesson(roadmap, index)`: creates one lesson folder at a time.
+- `removeRoadmapData(roadmapId)`: deletes roadmap, generated lessons, workspace copies, progress entries, and related progress events.
+- `learningStatusReducer(event, currentState)`: status/progress transitions.
+
+## Supported W3Schools Tracks
+
+The registry includes:
+
+- Python
+- JavaScript
+- HTML
+- CSS
+- SQL
+- MySQL
+- PHP
+- Java
+- C
+- C++
+- C#
+- R
+- Kotlin
+- TypeScript
+- Node.js
+- React
+- Angular
+- Vue
+- Django
+- PostgreSQL
+- MongoDB
+- NumPy
+- SciPy
+- Pandas
+- Bash
+- Git
+- Swift
+- Go
+- DSA
+- JSON/XML/data-related entries
+
+Core executable/good-template support is strongest for:
+
+- Python
+- JavaScript
+- Web: HTML/CSS/JavaScript
+- SQL
+- DSA in JavaScript
+
+Other tracks currently use generic text-check lessons unless runtime support is added later.
+
+## Prompt System
+
+The backend now includes named prompt constants:
+
+- `InterviewAgent`
+- `BeginnerSafetyValidator`
+- `TrackMatcher`
+- `RoadmapGenerator`
+- `RoadmapCritic`
+- `LessonGenerator`
+- `LessonCritic`
+- `StatusEngine`
+- `LearningIDEOrchestrator`
+
+Runtime behavior:
+
+- Ollama interview calls use `InterviewAgent + BeginnerSafetyValidator`.
+- Roadmap generation uses `LearningIDEOrchestrator + TrackMatcher + RoadmapGenerator + RoadmapCritic`.
+- The app still keeps deterministic safety rules; beginner language prompts are overridden locally if Ollama suggests unsafe/project-heavy questions.
+
+Core beginner language rule:
+
+```text
+If learner intent is "learn a language" and experience is beginner/new/from zero/no experience, use a zero-to-intermediate language course mode.
+Do not ask project-outcome questions.
+Do not suggest apps, APIs, automation, portfolio, jobs, interviews, freelancing, or frameworks.
+Outcome should be fundamentals mastery, small programs, and beginner-to-intermediate confidence.
+```
+
+## Interview Flow
+
+Required field order:
+
+1. `goal`
+2. `experience`
+3. `stack`
+4. `outcome`
+5. `depth`
+6. `learningStyle`
+7. `constraints`
+
+Rules:
+
+- Ask only the next missing field.
+- Never skip required fields.
+- Never ask later fields early.
+- Detect vague answers and clarify.
+- Detect beginner wording like:
+  - beginner
+  - complete beginner
+  - new
+  - no experience
+  - need to learn
+  - first learn
+  - learn completely
+  - from zero
+  - from scratch
+  - zero knowledge
+
+For beginner JavaScript/Python/language courses, safe outcome suggestions are like:
+
+- Complete JavaScript fundamentals
+- Practice every core topic
+- Reach beginner-to-intermediate JavaScript
+
+Bad suggestions must not appear:
+
+- Build an app
+- Create a REST API
+- Automate tasks with Node.js
+- Portfolio project
+- Job/interview/freelancing goals
+
+## Roadmap Engine
+
+Roadmaps are catalog-first now:
+
+- Match requested topic to W3Schools-supported track.
+- Use W3Schools-style topic order as the sequence.
+- Let Ollama personalize wording only, not reorder beginner prerequisites.
+- For beginner language paths, force the local safe catalog path.
+- Store course metadata on new roadmaps:
+  - `courseSource`
+  - `courseTrack`
+  - `timePlan`
+  - `depthLevel`
+  - `topicOrder`
+
+Beginner language order:
+
+1. Setup and running code
+2. Syntax and output
+3. Comments
+4. Variables
+5. Data types
+6. Operators
+7. Strings
+8. Conditions
+9. Loops
+10. Collections / arrays
+11. Functions
+12. Objects / classes where relevant
+13. Errors and debugging
+14. Files / DOM / database topics where relevant
+15. Review
+16. Capstone
+
+## Lesson Generation
+
+Every generated lesson should include:
+
+- `README.md`
+- `GUIDE.md`
+- `TASK.md`
+- `CHECKPOINT.md`
+- starter file
+- solution file
+- runnable check/test file
+
+Rules:
+
+- No bare TODO-only starter files.
+- Starter file must be meaningful and partially complete.
+- Solution file must fully solve the task.
+- Check file must test the real artifact, not only file existence.
+- README/GUIDE/TASK must not reveal the full solution.
+- Each lesson focuses on a distinct concept.
+
+## Progress / Status Engine
+
+Statuses:
+
+- `locked`
+- `ready`
+- `in_progress`
+- `ran`
+- `failed_check`
+- `passed_check`
+- `skipped`
+- `needs_review`
+- `mastered`
+- `blocked`
+
+Important rules:
+
+- Opening a lesson marks it ready.
+- Run marks `ran`.
+- Failed check marks `failed_check`.
+- Multiple failed checks can mark `needs_review`.
+- Passed check marks `mastered`.
+- Skip marks `skipped` and unlocks next, but skipped does not count as mastery.
+- Roadmap completion requires required lessons mastered.
+
+## Roadmap Remove Feature
+
+Roadmap rows now have a trash action.
+
+The delete flow:
+
+- Confirms with the user.
+- Removes the roadmap from `roadmaps.json`.
+- Deletes `generated-lessons/<lessonId>`.
+- Deletes `lesson-workspaces/<lessonId>`.
+- Removes progress entries for the deleted lessons.
+- Removes related progress events.
+- Clears the active workspace if the deleted roadmap was open.
+
+Important fix:
+
+- The roadmap row is a container with separate open/delete buttons.
+- Do not put the delete action inside the open button.
+
+## UI Fixes Already Done
+
+- Terminal works even with no project/file by starting in the home folder.
+- Terminal and Guide were separated; Guide moved to top drawer.
+- Preview moved to left nav and no longer lives in terminal area.
+- Preview hides right tutor and bottom terminal/guide.
+- Added `Run` and `Check` as separate actions.
+- Added resizable layout and neon separator rails.
+- Added professional empty states in Tutorial Parts and Files.
+- Added modern compact agent interview UI.
+- Added W3Schools track display in interview, roadmap list, lesson rows, and guide drawer.
+
+## Verification Status
+
+Most recent checks after prompt-system integration:
+
+```bash
+node --check electron/main.cjs
+npm run build
+```
+
+Both passed.
+
+Known warning:
+
+- Vite reports a large chunk warning. This is existing/expected and not currently blocking.
+
+## Important Failure Cases To Guard Against
+
+Hard failures the backend/UI should prevent:
+
+1. Beginner says "learn Python" but roadmap starts with API/app/project.
+2. Interview asks "What project do you want to build?" too early.
+3. Roadmap has vague modules like "Learn Basics".
+4. Lesson starter file is empty.
+5. Checkpoint only checks file existence, not actual output.
+6. Solution is revealed inside README/GUIDE/TASK.
+7. JavaScript learner gets React before JavaScript fundamentals.
+8. Python learner gets Django before Python fundamentals.
+9. Roadmap repeats the same calculator/task many times.
+10. Status shows completed when user skipped lessons.
+11. LLM invents unsupported tracks.
+12. Roadmap has no prerequisites.
+13. Module validation is not runnable.
+14. Lesson does not create a clear artifact.
+15. Interview jumps from goal directly to advanced outcome.
+
+## Separate ProducerWave Context From Interrupted Turn
+
+The user briefly asked about another project:
+
+- Project path: `/home/user029/Documents/producers_wave`
+- Next.js app running on port `14323`
+- Request was to move producer profile edit from `/profile/edit/` to `/producer/profile/edit/`, then create user profile edit at `/profile/edit/` from Figma node:
+  - `https://www.figma.com/design/lKkWrMxpSkuO5XX2O2ZtIP/ProducerWave--Copy-?node-id=467-15965&m=dev`
+
+That turn was interrupted before implementation. No confirmed changes for ProducerWave should be assumed from this memory unless inspected.
+
