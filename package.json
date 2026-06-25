@@ -8,14 +8,9 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron --no-sandbox .\"",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
-    "start": "electron --no-sandbox .",
-    "android:sync": "npm run build && cap sync android",
-    "android:debug": "npm run android:sync && cd android && JAVA_HOME=../.android-build-tools/jdk ANDROID_HOME=../.android-build-tools/sdk ./gradlew assembleDebug"
+    "start": "electron --no-sandbox ."
   },
   "dependencies": {
-    "@capacitor/android": "^8.4.0",
-    "@capacitor/cli": "^8.4.0",
-    "@capacitor/core": "^8.4.0",
     "@monaco-editor/react": "^4.7.0",
     "@vitejs/plugin-react": "^5.1.1",
     "@xterm/addon-fit": "^0.10.0",

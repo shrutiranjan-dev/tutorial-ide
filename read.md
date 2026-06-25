@@ -381,50 +381,6 @@ Known warning:
 
 - Vite reports a large chunk warning. This is existing/expected and not currently blocking.
 
-## Android Debug Build Context
-
-Android packaging was added with Capacitor so the Vite UI can be tested on a phone.
-
-Important files:
-
-- `capacitor.config.ts`
-- `android/`
-- `src/browserApi.ts`
-
-Important behavior:
-
-- Desktop Electron still uses `window.tutorialIde` from `electron/preload.cjs`.
-- Android/WebView uses `createBrowserTutorialIde()` when Electron IPC is unavailable.
-- The browser fallback stores demo files/progress in `localStorage`.
-- The Android build is for UI and flow testing. It does not provide real `node-pty`, real desktop filesystem access, or desktop Ollama IPC.
-
-Local build tooling:
-
-- Local JDK: `.android-build-tools/jdk`
-- Local Android SDK: `.android-build-tools/sdk`
-- These are ignored by git because they are large machine-local tools.
-
-Build command:
-
-```bash
-npm run android:debug
-```
-
-Latest debug APK:
-
-```text
-/home/user029/my-project/tutorial-ide/tutorial-ide-debug.apk
-/home/user029/my-project/tutorial-ide/android/app/build/outputs/apk/debug/app-debug.apk
-```
-
-Last Android verification:
-
-```bash
-npm run android:debug
-```
-
-Result: passed, APK generated.
-
 ## Important Failure Cases To Guard Against
 
 Hard failures the backend/UI should prevent:

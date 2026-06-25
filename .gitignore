@@ -3,6 +3,8 @@ dist/
 .vite/
 .cache/
 .android-build-tools/
+android/
+capacitor.config.ts
 tutorial-ide-debug.apk
 
 *.log
