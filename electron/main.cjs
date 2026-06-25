@@ -1,9 +1,18 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
-const { exec } = require("child_process");
+const { exec, spawn } = require("child_process");
+
+const logger = {
+  log: (...args) => console.log(`[LOG] ${new Date().toISOString()} ${args.join(" ")}`),
+  warn: (...args) => console.warn(`[WARN] ${new Date().toISOString()} ${args.join(" ")}`),
+  error: (...args) => console.error(`[ERROR] ${new Date().toISOString()} ${args.join(" ")}`),
+  debug: (...args) => {
+    if (process.env.DEBUG) console.log(`[DEBUG] ${new Date().toISOString()} ${args.join(" ")}`);
+  },
+};
 
 let pty;
 try {
@@ -15,10 +24,26 @@ try {
 const rootDir = path.resolve(__dirname, "..");
 const lessonsDir = path.join(rootDir, "lessons");
 const terminals = new Map();
+const defaultProjectPath = rootDir;
+const openCodeSessions = new Map();
+const openCodeSyncedDirectories = new Set();
+const openCodeEventStreams = new Map();
+let openCodeServer = null;
+let openCodeServerStarting = null;
 
-app.commandLine.appendSwitch("disable-gpu");
-app.commandLine.appendSwitch("disable-software-rasterizer");
-app.disableHardwareAcceleration();
+const codeWorkbenchIdentity = [
+  "You are Code, the AI coding agent inside Code Workbench.",
+  "Your visible product name is Code. Never introduce yourself as OpenCode or opencode.",
+  "If the user asks your name, who you are, or what tool you are, answer as Code, not as a CLI.",
+  "You may use the vendored Code engine and selected local/cloud model behind the scenes, but do not expose OpenCode branding unless the user explicitly asks about engine internals.",
+  "Work through the Code Workbench GUI experience: explain, plan, edit, inspect files, use tools, and report progress clearly."
+].join("\n");
+
+const codeWorkbenchIdentityReminder = `<system-reminder>\n${codeWorkbenchIdentity}\n</system-reminder>`;
+
+function withCodeWorkbenchIdentity(promptText) {
+  return [codeWorkbenchIdentityReminder, String(promptText || "").trim()].filter(Boolean).join("\n\n");
+}
 
 function createWindow() {
   const mainWindow = new BrowserWindow({
@@ -26,13 +51,25 @@ function createWindow() {
     height: 920,
     minWidth: 1100,
     minHeight: 720,
-    title: "Tutorial IDE",
+    title: "Code Workbench",
+    autoHideMenuBar: true,
     backgroundColor: "#121418",
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false
     }
+  });
+  mainWindow.setMenu(null);
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    const levels = ["log", "warn", "error", "debug"];
+    logger[levels[level] || "log"](`[renderer] ${message}${sourceId ? ` (${sourceId}:${line})` : ""}`);
+  });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    logger.error(`[renderer gone] ${details.reason} exitCode=${details.exitCode}`);
+  });
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    logger.error(`[renderer load failed] ${errorCode} ${errorDescription} ${validatedURL}`);
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {
@@ -52,6 +89,13 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   for (const term of terminals.values()) term.kill();
   if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", () => {
+  for (const term of terminals.values()) term.kill();
+  if (openCodeServer?.proc && !openCodeServer.proc.killed) {
+    openCodeServer.proc.kill();
+  }
 });
 
 function userDataPath(...parts) {
@@ -110,6 +154,909 @@ function progressStorePath() {
 
 function progressEventsPath() {
   return userDataPath("progress-events.json");
+}
+
+function opencodeBin() {
+  return path.join(rootDir, "node_modules", ".bin", process.platform === "win32" ? "opencode.cmd" : "opencode");
+}
+
+function opencodeCommand(args = "") {
+  const bin = opencodeBin();
+  return `"${bin}"${args ? ` ${args}` : ""}`;
+}
+
+function normalizeAgentModel(model = "") {
+  if (model && typeof model === "object") {
+    const providerID = String(model.providerID || model.provider || "").trim() || "ollama";
+    const modelID = String(model.modelID || model.id || model.model || "").trim();
+    if (!modelID) return null;
+    return {
+      providerID,
+      modelID,
+      label: `${providerID}/${modelID}`
+    };
+  }
+  const raw = String(model || "").trim();
+  if (!raw) return null;
+  if (!raw.includes("/")) {
+    return {
+      providerID: "ollama",
+      modelID: raw,
+      label: `ollama/${raw}`
+    };
+  }
+  const slash = raw.indexOf("/");
+  const providerID = raw.slice(0, slash).trim() || "ollama";
+  const modelID = raw.slice(slash + 1).trim();
+  if (!modelID) return null;
+  return {
+    providerID,
+    modelID,
+    label: `${providerID}/${modelID}`
+  };
+}
+
+function openCodeDirectoryQuery(projectPath) {
+  return `directory=${encodeURIComponent(path.resolve(projectPath || rootDir))}`;
+}
+
+function openCodeQuery(projectPath, params = {}) {
+  const query = new URLSearchParams();
+  query.set("directory", path.resolve(projectPath || rootDir));
+  for (const [key, value] of Object.entries(params || {})) {
+    if (value === undefined || value === null || value === "") continue;
+    query.set(key, String(value));
+  }
+  return query.toString();
+}
+
+function openCodeJsonOptions(method, body) {
+  return {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  };
+}
+
+async function openCodeFetchFirst(candidates) {
+  let lastError;
+  for (const candidate of candidates) {
+    try {
+      return await openCodeFetch(candidate.route, candidate.options || {});
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("No Code engine endpoint candidates were provided.");
+}
+
+function unwrapOpenCodeData(value) {
+  if (value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "data")) return value.data;
+  return value;
+}
+
+function openCodeArray(value) {
+  const data = unwrapOpenCodeData(value);
+  return Array.isArray(data) ? data : [];
+}
+
+function openCodeModelForInstance(modelSpec) {
+  if (!modelSpec) return undefined;
+  return {
+    providerID: modelSpec.providerID,
+    id: modelSpec.modelID
+  };
+}
+
+function openCodeModelRef(modelSpec) {
+  if (!modelSpec) return undefined;
+  return {
+    providerID: modelSpec.providerID,
+    modelID: modelSpec.modelID
+  };
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function ensureOpenCodeServer() {
+  if (openCodeServer?.url && openCodeServer.proc && !openCodeServer.proc.killed) {
+    return Promise.resolve(openCodeServer);
+  }
+  if (openCodeServerStarting) return openCodeServerStarting;
+
+  openCodeServerStarting = new Promise((resolve, reject) => {
+    const bin = opencodeBin();
+    if (!fs.existsSync(bin)) {
+      openCodeServerStarting = null;
+      reject(new Error(`Code engine binary was not found at ${bin}.`));
+      return;
+    }
+
+    const proc = spawn(bin, ["serve", "--hostname=127.0.0.1", "--port=0"], {
+      cwd: rootDir,
+      env: { ...process.env, NO_COLOR: "1" },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const logs = [];
+    let buffer = "";
+    let settled = false;
+
+    const cleanupTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      openCodeServerStarting = null;
+      if (!proc.killed) proc.kill();
+      
+      const fullLogs = logs.join("\n");
+      let errorMessage = `Timed out starting Code server.\n${fullLogs.slice(-3000)}`;
+      if (fullLogs.includes("EADDRINUSE")) errorMessage = "Port conflict: The port is already in use. Try restarting the application.";
+      else if (fullLogs.includes("permission denied")) errorMessage = "Permission denied: The application lacks necessary permissions to run the Code engine.";
+      else if (fullLogs.includes("command not found")) errorMessage = "Binary missing: The Code engine binary could not be executed.";
+      
+      reject(new Error(errorMessage));
+    }, 20000);
+
+    const resolveWithUrl = (url) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(cleanupTimer);
+      openCodeServer = { proc, url, logs };
+      openCodeServerStarting = null;
+      resolve(openCodeServer);
+    };
+
+    const handleOutput = (chunk) => {
+      const text = String(chunk || "");
+      buffer += text;
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        logs.push(line);
+      }
+      const match =
+        buffer.match(/opencode server listening.*on\s+(https?:\/\/[^\s]+)/i) ||
+        buffer.match(/(https?:\/\/127\.0\.0\.1:\d+)/);
+      if (match?.[1]) resolveWithUrl(match[1].replace(/[.,;]+$/, ""));
+    };
+
+    proc.stdout?.on("data", handleOutput);
+    proc.stderr?.on("data", handleOutput);
+    proc.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(cleanupTimer);
+      openCodeServerStarting = null;
+      reject(error);
+    });
+    proc.on("exit", (code, signal) => {
+      if (openCodeServer?.proc === proc) {
+        openCodeServer = null;
+        openCodeSyncedDirectories.clear();
+        openCodeSessions.clear();
+      }
+      if (settled) return;
+      settled = true;
+      clearTimeout(cleanupTimer);
+      openCodeServerStarting = null;
+      reject(new Error(`Code server exited before startup (${signal || code}).\n${logs.join("\n").slice(-3000)}`));
+    });
+  });
+
+  return openCodeServerStarting;
+}
+
+async function openCodeFetch(route, options = {}) {
+  const server = await ensureOpenCodeServer();
+  const response = await fetch(`${server.url}${route}`, options);
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(`Code server returned ${response.status} for ${route}.\n${text.slice(0, 3000)}`);
+  }
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function ensureOpenCodeSync(projectPath) {
+  const directory = path.resolve(projectPath || rootDir);
+  if (openCodeSyncedDirectories.has(directory)) return;
+  await openCodeFetchFirst([
+    { route: `/sync/start?${openCodeQuery(projectPath)}`, options: openCodeJsonOptions("POST", {}) },
+    { route: `/api/sync/start?${openCodeQuery(projectPath)}`, options: openCodeJsonOptions("POST", {}) }
+  ]);
+  openCodeSyncedDirectories.add(directory);
+}
+
+function fullAccessPermissionRules() {
+  return permissionRulesForMode("full");
+}
+
+function permissionRulesForMode(mode = "full") {
+  const value = String(mode || "full").toLowerCase();
+  const permissions = [
+    "read",
+    "edit",
+    "glob",
+    "grep",
+    "list",
+    "bash",
+    "task",
+    "external_directory",
+    "lsp",
+    "skill",
+    "todowrite",
+    "webfetch",
+    "websearch"
+  ];
+  const readonlyDenied = new Set(["edit", "bash", "task", "external_directory", "todowrite"]);
+  const askBefore = new Set(["edit", "bash", "task", "external_directory", "webfetch", "websearch"]);
+  return permissions.map((permission) => {
+    let action = "allow";
+    if (value.includes("read")) action = readonlyDenied.has(permission) ? "deny" : "allow";
+    if (value.includes("ask")) action = askBefore.has(permission) ? "ask" : "allow";
+    return { permission, pattern: "*", action };
+  });
+}
+
+function openCodeSessionKey(projectPath, modelSpec, permissionMode = "full") {
+  return `${path.resolve(projectPath || rootDir)}::${modelSpec.providerID}/${modelSpec.modelID}::${permissionMode}`;
+}
+
+async function createOpenCodeSession(projectPath, modelSpec, permissionMode = "full") {
+  const directory = path.resolve(projectPath || rootDir);
+  const instanceBody = {
+    agent: "build",
+    title: "Code Workbench",
+    model: openCodeModelForInstance(modelSpec),
+    permission: permissionRulesForMode(permissionMode)
+  };
+  const protocolBody = {
+    agent: "build",
+    model: openCodeModelRef(modelSpec),
+    permission: permissionRulesForMode(permissionMode),
+    location: {
+      directory
+    }
+  };
+
+  const created = await openCodeFetchFirst([
+    { route: `/session?${openCodeQuery(projectPath)}`, options: openCodeJsonOptions("POST", instanceBody) },
+    { route: "/api/session", options: openCodeJsonOptions("POST", protocolBody) }
+  ]);
+  const session = unwrapOpenCodeData(created);
+  if (session?.id) return session;
+
+  throw new Error("Code server did not return a session id.");
+}
+
+async function createOpenCodeSessionFromPayload(projectPath, payload = {}) {
+  const modelSpec = normalizeAgentModel(payload.model || payload.modelRef || payload.modelID || "");
+  if (modelSpec) return createOpenCodeSession(projectPath, modelSpec, payload.permissionMode || payload.mode || "full");
+  const body = {
+    title: payload.title || "Code Workbench",
+    agent: payload.agent || "build",
+    metadata: payload.metadata || undefined,
+    permission: payload.permission || permissionRulesForMode(payload.permissionMode || "full"),
+    workspaceID: payload.workspaceID || undefined
+  };
+  const data = await openCodeFetchFirst([
+    { route: `/session?${openCodeQuery(projectPath)}`, options: openCodeJsonOptions("POST", body) },
+    {
+      route: "/api/session",
+      options: openCodeJsonOptions("POST", {
+        id: payload.id || undefined,
+        agent: payload.agent || undefined,
+        location: { directory: path.resolve(projectPath || rootDir) }
+      })
+    }
+  ]);
+  const session = unwrapOpenCodeData(data);
+  if (session?.id) return session;
+  throw new Error("Code server did not return a session id.");
+}
+
+async function ensureOpenCodeSession(projectPath, modelSpec, permissionMode = "full") {
+  await ensureOpenCodeSync(projectPath);
+  const key = openCodeSessionKey(projectPath, modelSpec, permissionMode);
+  const existing = openCodeSessions.get(key);
+  if (existing?.id) {
+    const statusMap = await readOpenCodeSessionStatus(projectPath).catch(() => ({}));
+    const status = statusMap?.[existing.id]?.type || statusMap?.[existing.id]?.status || "";
+    if (status !== "busy") return existing;
+    openCodeSessions.delete(key);
+  }
+  const session = await createOpenCodeSession(projectPath, modelSpec, permissionMode);
+  const value = { id: session.id, model: modelSpec, directory: projectPath || rootDir, permissionMode };
+  openCodeSessions.set(key, value);
+  return value;
+}
+
+async function readOpenCodeMessages(sessionID, projectPath) {
+  if (!sessionID) return [];
+  const id = encodeURIComponent(sessionID);
+  const data = await openCodeFetchFirst([
+    { route: `/session/${id}/message?${openCodeQuery(projectPath, { limit: 80 })}` },
+    { route: `/api/session/${id}/message?${openCodeQuery(projectPath, { limit: 80, order: "asc" })}` }
+  ]);
+  return openCodeArray(data);
+}
+
+async function readOpenCodeSessionStatus(projectPath) {
+  try {
+    const data = await openCodeFetch(`/session/status?${openCodeQuery(projectPath)}`);
+    return unwrapOpenCodeData(data) || {};
+  } catch {
+    return {};
+  }
+}
+
+async function listOpenCodeSessions(projectPath) {
+  const data = await openCodeFetchFirst([
+    { route: `/session?${openCodeQuery(projectPath, { scope: "project", limit: 40 })}` },
+    { route: `/api/session?${openCodeQuery(projectPath, { limit: 40, order: "desc" })}` }
+  ]);
+  return openCodeArray(data);
+}
+
+async function getOpenCodeSession(sessionID, projectPath) {
+  if (!sessionID) return null;
+  const id = encodeURIComponent(sessionID);
+  const data = await openCodeFetchFirst([
+    { route: `/session/${id}?${openCodeQuery(projectPath)}` },
+    { route: `/api/session/${id}?${openCodeQuery(projectPath)}` }
+  ]);
+  return unwrapOpenCodeData(data);
+}
+
+async function forkOpenCodeSession(sessionID, projectPath, payload = {}) {
+  if (!sessionID) return null;
+  const id = encodeURIComponent(sessionID);
+  const body = payload.messageID ? { messageID: payload.messageID } : undefined;
+  const data = await openCodeFetchFirst([
+    { route: `/session/${id}/fork?${openCodeQuery(projectPath)}`, options: openCodeJsonOptions("POST", body) },
+    { route: `/api/session`, options: openCodeJsonOptions("POST", { id: payload.id, location: { directory: path.resolve(projectPath || rootDir) } }) }
+  ]);
+  return unwrapOpenCodeData(data);
+}
+
+async function updateOpenCodeSession(sessionID, projectPath, payload = {}) {
+  if (!sessionID) return null;
+  const id = encodeURIComponent(sessionID);
+  const { sessionID: _sessionID, id: _id, projectPath: _projectPath, update: _update, ...rest } = payload || {};
+  const body = payload.update && typeof payload.update === "object" ? payload.update : rest;
+  const data = await openCodeFetch(`/session/${id}?${openCodeQuery(projectPath)}`, openCodeJsonOptions("PATCH", body));
+  return unwrapOpenCodeData(data);
+}
+
+async function deleteOpenCodeSession(sessionID, projectPath) {
+  if (!sessionID) return false;
+  const id = encodeURIComponent(sessionID);
+  await openCodeFetch(`/session/${id}?${openCodeQuery(projectPath)}`, { method: "DELETE" });
+  for (const [key, value] of openCodeSessions.entries()) {
+    if (value?.id === sessionID) openCodeSessions.delete(key);
+  }
+  return true;
+}
+
+function openCodeMessageRole(message) {
+  return message?.info?.role || message?.role || message?.message?.role || "";
+}
+
+function openCodePartText(part) {
+  if (!part || typeof part !== "object") return "";
+  const nested = part.part && typeof part.part === "object" ? openCodePartText(part.part) : "";
+  if (nested) return nested;
+  if (part.type === "text" && typeof part.text === "string") return part.text;
+  if (part.type === "reasoning" && typeof part.text === "string") return part.text;
+  if (typeof part.text === "string") return part.text;
+  if (typeof part.content === "string") return part.content;
+  if (typeof part.output === "string") return part.output;
+  if (typeof part.result === "string") return part.result;
+  if (part.text && typeof part.text === "object" && typeof part.text.value === "string") return part.text.value;
+  if (part.content && typeof part.content === "object" && typeof part.content.text === "string") return part.content.text;
+  return "";
+}
+
+function latestAssistantText(messages, previousAssistantCount) {
+  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
+  const candidates = assistants.slice(previousAssistantCount);
+  const latest = candidates.at(-1) || assistants.at(-1);
+  if (!latest) return "";
+  return (latest.parts || [])
+    .map(openCodePartText)
+    .filter(Boolean)
+    .join("\n")
+    .trim();
+}
+
+function bestAssistantText(messages, previousAssistantCount) {
+  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
+  const candidates = assistants.slice(previousAssistantCount);
+  return candidates
+    .map((message) => (message.parts || []).map(openCodePartText).filter(Boolean).join("\n").trim())
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)[0] || latestAssistantText(messages, previousAssistantCount);
+}
+
+function latestAssistantMessage(messages, previousAssistantCount = 0) {
+  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
+  const candidates = assistants.slice(previousAssistantCount);
+  return candidates.at(-1) || assistants.at(-1) || null;
+}
+
+function safeJsonPreview(value, fallback = "") {
+  try {
+    return JSON.stringify(value, null, 2) || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function safeOpenCodeText(value, fallback = "") {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  if (Array.isArray(value)) {
+    const text = value.map((item) => safeOpenCodeText(item)).filter(Boolean).join(", ");
+    return text || fallback;
+  }
+  if (typeof value === "object") {
+    for (const key of ["title", "name", "tool", "type", "status", "message", "command", "path", "file", "text", "content"]) {
+      const nested = value[key];
+      if (typeof nested === "string" || typeof nested === "number" || typeof nested === "boolean" || typeof nested === "bigint") {
+        return String(nested);
+      }
+    }
+    return safeJsonPreview(value, fallback).slice(0, 4000);
+  }
+  return fallback;
+}
+
+function summarizeOpenCodePart(part) {
+  if (!part || typeof part !== "object") return null;
+  if (part.part && typeof part.part === "object") return summarizeOpenCodePart(part.part);
+  if (["text", "reasoning", "patch", "step-start", "step-finish"].includes(part.type)) return null;
+  if (part.type === "tool" && ["todowrite"].includes(String(part.tool || part.name || ""))) return null;
+  if (part.type === "tool" && String(part.tool || part.name || "") === "question" && ["pending", "running"].includes(String(part.status || part.state || ""))) return null;
+  const title =
+    part.title ||
+    part.name ||
+    part.tool ||
+    part.input?.filePath ||
+    part.input?.path ||
+    part.input?.command ||
+    part.input?.query ||
+    part.command ||
+    part.filename ||
+    part.file ||
+    part.type ||
+    "Code step";
+  const detail =
+    part.text ||
+    part.content ||
+    part.output ||
+    part.error ||
+    part.metadata?.filediff ||
+    part.input?.content ||
+    part.input?.command ||
+    part.input?.query ||
+    part.path ||
+    part.url ||
+    part.command ||
+    "";
+  const titleText = safeOpenCodeText(title, "Code step");
+  const typeText = safeOpenCodeText(part.tool || part.name || part.type || "part", "part");
+  return {
+    id: safeOpenCodeText(part.id, `${typeText}-${titleText}`),
+    type: typeText,
+    title: titleText,
+    status: safeOpenCodeText(part.status || part.state || part.phase || ""),
+    detail: safeOpenCodeText(detail).slice(0, 4000),
+    raw: part
+  };
+}
+
+function collectOpenCodeTools(messages, previousAssistantCount = 0) {
+  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
+  return assistants
+    .slice(previousAssistantCount)
+    .flatMap((message) => (message.parts || []).map(summarizeOpenCodePart).filter(Boolean));
+}
+
+function emitAgentEvent(sender, requestId, event) {
+  if (!sender || !requestId || sender.isDestroyed?.()) return;
+  sender.send("opencode:event", {
+    requestId,
+    time: Date.now(),
+    ...event
+  });
+}
+
+async function streamOpenCodeEvents(sender, requestId, sessionID, projectPath, controller) {
+  const server = await ensureOpenCodeServer();
+  const response = await fetch(`${server.url}/event?${openCodeQuery(projectPath)}`, {
+    signal: controller.signal,
+    headers: { Accept: "text/event-stream" }
+  });
+  if (!response.ok || !response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let textByPart = new Map();
+  let toolsByPart = new Map();
+
+  const handleEvent = (raw) => {
+    const lines = raw.split(/\r?\n/);
+    const dataLines = lines
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart());
+    if (!dataLines.length) return;
+    let event;
+    try {
+      event = JSON.parse(dataLines.join("\n"));
+    } catch {
+      return;
+    }
+    const type = event.type || "";
+    const properties = event.properties || event.data || {};
+    if (sessionID && properties.sessionID && properties.sessionID !== sessionID) return;
+
+    if (type === "message.part.delta" && properties.field === "text") {
+      const partID = properties.partID || "assistant";
+      const next = `${textByPart.get(partID) || ""}${properties.delta || ""}`;
+      textByPart.set(partID, next);
+      emitAgentEvent(sender, requestId, { type: "text", sessionID, text: Array.from(textByPart.values()).join("\n") });
+      return;
+    }
+
+    if (type === "permission.asked" || type === "permission.v2.asked") {
+      emitAgentEvent(sender, requestId, {
+        type: "permissions",
+        sessionID,
+        permissions: [properties.request || properties.permission || properties]
+      });
+      return;
+    }
+
+    if (type === "session.diff" && Array.isArray(properties.diff)) {
+      emitAgentEvent(sender, requestId, { type: "diff", sessionID, diff: properties.diff });
+      return;
+    }
+
+    if (type === "file.watcher.updated") {
+      emitAgentEvent(sender, requestId, {
+        type: "files",
+        sessionID,
+        file: properties.file,
+        event: properties.event || "change"
+      });
+      return;
+    }
+
+    if (type.startsWith("message.part.") && properties.part && properties.part.type !== "text") {
+      const summary = summarizeOpenCodePart(properties.part);
+      if (summary) {
+        toolsByPart.set(summary.id, summary);
+        emitAgentEvent(sender, requestId, { type: "tools", sessionID, tools: Array.from(toolsByPart.values()) });
+      }
+      return;
+    }
+
+    if (type === "session.status" && properties.status?.type) {
+      emitAgentEvent(sender, requestId, {
+        type: "status",
+        status: properties.status.type,
+        message: properties.status.type === "busy" ? "Code is working..." : "Code is idle."
+      });
+    }
+  };
+
+  while (!controller.signal.aborted) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split(/\n\n/);
+    buffer = chunks.pop() || "";
+    chunks.forEach(handleEvent);
+  }
+}
+
+function stopOpenCodeEventStream(streamID) {
+  const stream = openCodeEventStreams.get(streamID);
+  if (!stream) return false;
+  stream.controller.abort();
+  openCodeEventStreams.delete(streamID);
+  return true;
+}
+
+function startOpenCodeEventStream(sender, payload = {}) {
+  const streamID = payload.streamID || `stream-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  stopOpenCodeEventStream(streamID);
+  const controller = new AbortController();
+  const projectPath = payload.projectPath || rootDir;
+  const sessionID = payload.sessionID || "";
+  const requestId = payload.requestId || streamID;
+  openCodeEventStreams.set(streamID, { controller, sessionID, projectPath });
+  streamOpenCodeEvents(sender, requestId, sessionID, projectPath, controller)
+    .catch((error) => {
+      if (!controller.signal.aborted) {
+        emitAgentEvent(sender, requestId, { type: "error", message: error.message || String(error) });
+      }
+    })
+    .finally(() => {
+      if (openCodeEventStreams.get(streamID)?.controller === controller) openCodeEventStreams.delete(streamID);
+    });
+  return { streamID, subscriptionID: streamID, id: streamID, requestId, sessionID: sessionID || undefined };
+}
+
+async function listOpenCodeCommands(projectPath) {
+  try {
+    const data = await openCodeFetch(`/api/command?${openCodeQuery(projectPath)}`);
+    return openCodeArray(data);
+  } catch {
+    const data = await openCodeFetch(`/command?${openCodeQuery(projectPath)}`);
+    return openCodeArray(data);
+  }
+}
+
+async function readOpenCodeProviderState(projectPath) {
+  try {
+    const data = await openCodeFetch(`/provider?${openCodeDirectoryQuery(projectPath)}`);
+    return data?.data || data || { all: [], default: {}, connected: [] };
+  } catch {
+    try {
+      const data = await openCodeFetch(`/api/provider?${openCodeDirectoryQuery(projectPath)}`);
+      const providers = data?.data || data || [];
+      return {
+        all: Array.isArray(providers) ? providers : [],
+        default: {},
+        connected: Array.isArray(providers) ? providers.filter((item) => item.auth || item.connected).map((item) => item.id) : []
+      };
+    } catch {
+      return { all: [], default: {}, connected: [] };
+    }
+  }
+}
+
+async function readOpenCodeProviderAuth(projectPath) {
+  try {
+    const data = await openCodeFetch(`/provider/auth?${openCodeDirectoryQuery(projectPath)}`);
+    return data?.data || data || {};
+  } catch {
+    return {};
+  }
+}
+
+async function authorizeOpenCodeProvider(providerID, method, inputs, projectPath) {
+  return openCodeFetch(
+    `/provider/${encodeURIComponent(providerID)}/oauth/authorize?${openCodeDirectoryQuery(projectPath)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ method: Number(method || 0), inputs: inputs || {} })
+    }
+  );
+}
+
+async function callbackOpenCodeProvider(providerID, method, code, projectPath) {
+  return openCodeFetch(
+    `/provider/${encodeURIComponent(providerID)}/oauth/callback?${openCodeDirectoryQuery(projectPath)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ method: Number(method || 0), code: code || undefined })
+    }
+  );
+}
+
+async function saveOpenCodeProviderApiKey(providerID, key, projectPath) {
+  await openCodeFetch(`/auth/${encodeURIComponent(providerID)}?${openCodeDirectoryQuery(projectPath)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "api", key })
+  });
+  return true;
+}
+
+async function readOpenCodePermissions(sessionID, projectPath) {
+  const query = openCodeQuery(projectPath);
+  if (!sessionID) {
+    try {
+      return openCodeArray(await openCodeFetch(`/permission?${query}`));
+    } catch {
+      try {
+        return openCodeArray(await openCodeFetch(`/api/permission/request?${query}`));
+      } catch {
+        return [];
+      }
+    }
+  }
+  try {
+    const data = await openCodeFetch(`/permission?${query}`);
+    const all = openCodeArray(data);
+    return all.filter((item) => !item.sessionID || item.sessionID === sessionID);
+  } catch {
+    try {
+      const data = await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/permission?${query}`);
+      return openCodeArray(data);
+    } catch {
+      return [];
+    }
+  }
+}
+
+async function replyOpenCodePermission(sessionID, requestID, reply, projectPath, message) {
+  if (!requestID) return false;
+  const body = { reply, message: message || undefined };
+  try {
+    await openCodeFetch(
+      `/permission/${encodeURIComponent(requestID)}/reply?${openCodeQuery(projectPath)}`,
+      openCodeJsonOptions("POST", body)
+    );
+    return true;
+  } catch {
+    if (!sessionID) throw new Error("Permission reply fallback requires a session id.");
+    await openCodeFetch(
+      `/api/session/${encodeURIComponent(sessionID)}/permission/${encodeURIComponent(requestID)}/reply?${openCodeQuery(projectPath)}`,
+      openCodeJsonOptions("POST", body)
+    );
+    return true;
+  }
+}
+
+async function readOpenCodeDiff(sessionID, projectPath, messageID) {
+  if (!sessionID) return [];
+  const suffix = openCodeQuery(projectPath, { messageID });
+  try {
+    const data = await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/diff?${suffix}`);
+    return openCodeArray(data);
+  } catch {
+    return [];
+  }
+}
+
+async function readOpenCodeTodo(sessionID, projectPath) {
+  if (!sessionID) return [];
+  const data = await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/todo?${openCodeQuery(projectPath)}`);
+  return openCodeArray(data);
+}
+
+async function abortOpenCodeSession(sessionID, projectPath) {
+  if (!sessionID) return false;
+  await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/abort?${openCodeQuery(projectPath)}`, { method: "POST" });
+  return true;
+}
+
+async function revertOpenCodeSession(sessionID, projectPath, payload = {}) {
+  if (!sessionID || !payload.messageID) return null;
+  const data = await openCodeFetch(
+    `/session/${encodeURIComponent(sessionID)}/revert?${openCodeQuery(projectPath)}`,
+    openCodeJsonOptions("POST", { messageID: payload.messageID, partID: payload.partID || undefined })
+  );
+  return unwrapOpenCodeData(data);
+}
+
+async function unrevertOpenCodeSession(sessionID, projectPath) {
+  if (!sessionID) return null;
+  const data = await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/unrevert?${openCodeQuery(projectPath)}`, {
+    method: "POST"
+  });
+  return unwrapOpenCodeData(data);
+}
+
+function openCodePromptPayload(payload = {}, modelSpec) {
+  const text = payload.prompt ?? payload.text ?? payload.message ?? "";
+  return {
+    messageID: payload.messageID || undefined,
+    agent: payload.agent || "build",
+    model: payload.modelRef || openCodeModelRef(modelSpec || normalizeAgentModel(payload.model || "")) || undefined,
+    noReply: payload.noReply || undefined,
+    system: payload.system || undefined,
+    variant: payload.variant || undefined,
+    parts: Array.isArray(payload.parts) && payload.parts.length ? payload.parts : [{ type: "text", text: String(text) }]
+  };
+}
+
+function openCodeProtocolPromptPayload(payload = {}) {
+  const parts = Array.isArray(payload.parts) ? payload.parts : [];
+  const text =
+    payload.promptText ||
+    payload.prompt ||
+    payload.text ||
+    parts
+      .filter((part) => part?.type === "text")
+      .map((part) => part.text || "")
+      .join("\n");
+  const files = parts
+    .filter((part) => part?.type === "file")
+    .map((part) => ({
+      uri: part.url,
+      mime: part.mime,
+      name: part.filename,
+      description: part.description,
+      source: part.source
+    }));
+  const agents = parts
+    .filter((part) => part?.type === "agent")
+    .map((part) => ({
+      name: part.name,
+      source: part.source
+    }));
+  return {
+    id: payload.messageID || undefined,
+    prompt: {
+      text: String(text || ""),
+      files: files.length ? files : undefined,
+      agents: agents.length ? agents : undefined
+    },
+    delivery: payload.delivery || undefined,
+    resume: payload.resume
+  };
+}
+
+async function sendOpenCodePrompt(sessionID, projectPath, payload = {}) {
+  if (!sessionID) throw new Error("No active Code session.");
+  const modelSpec = payload.model ? normalizeAgentModel(payload.model) : null;
+  const body = openCodePromptPayload(payload, modelSpec);
+  const route = payload.async === false ? "message" : "prompt_async";
+  const id = encodeURIComponent(sessionID);
+  const data = await openCodeFetchFirst([
+    { route: `/session/${id}/${route}?${openCodeQuery(projectPath)}`, options: openCodeJsonOptions("POST", body) },
+    {
+      route: `/api/session/${id}/prompt?${openCodeQuery(projectPath)}`,
+      options: openCodeJsonOptions("POST", openCodeProtocolPromptPayload(payload))
+    }
+  ]);
+  const admitted = unwrapOpenCodeData(data) || data || {};
+  const admittedObject = typeof admitted === "object" && admitted ? admitted : {};
+  return {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    command: `code prompt ${sessionID}`,
+    sessionID,
+    messageID: admittedObject.messageID || admittedObject.id || body.messageID,
+    providerID: modelSpec?.providerID,
+    modelID: modelSpec?.modelID,
+    admitted: true
+  };
+}
+
+async function runOpenCodeCommand(sessionID, projectPath, payload = {}) {
+  if (!sessionID) throw new Error("No active Code session.");
+  const command = String(payload.command || "").replace(/^\//, "");
+  const body = {
+    messageID: payload.messageID || undefined,
+    agent: payload.agent || "build",
+    model: payload.model || undefined,
+    command,
+    arguments: payload.arguments || payload.args || "",
+    variant: payload.variant || undefined,
+    parts: Array.isArray(payload.parts) ? payload.parts : undefined
+  };
+  const data = await openCodeFetch(
+    `/session/${encodeURIComponent(sessionID)}/command?${openCodeQuery(projectPath)}`,
+    openCodeJsonOptions("POST", body)
+  );
+  return unwrapOpenCodeData(data);
+}
+
+async function runOpenCodeShell(sessionID, projectPath, payload = {}) {
+  if (!sessionID) throw new Error("No active Code session.");
+  const modelSpec = payload.model ? normalizeAgentModel(payload.model) : null;
+  const data = await openCodeFetch(
+    `/session/${encodeURIComponent(sessionID)}/shell?${openCodeQuery(projectPath)}`,
+    openCodeJsonOptions("POST", {
+      messageID: payload.messageID || undefined,
+      agent: payload.agent || "build",
+      model: openCodeModelRef(modelSpec) || payload.modelRef || undefined,
+      command: String(payload.command || payload.shell || "")
+    })
+  );
+  return unwrapOpenCodeData(data);
 }
 
 async function writeJson(filePath, value) {
@@ -3502,14 +4449,192 @@ function runCommand(workspacePath, command) {
   });
 }
 
+async function runGuiAgentCommand(projectPath, model, prompt, sender, options = {}) {
+  const modelSpec = normalizeAgentModel(model);
+  const promptText = String(prompt || "").trim();
+  const requestId = options.requestId || `agent-${Date.now().toString(36)}`;
+  const permissionMode = options.permissionMode || "full";
+  if (!promptText) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "Prompt is empty.",
+      command: "code gui agent"
+    };
+  }
+  if (!modelSpec) {
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "Choose a Code model before running the GUI agent.",
+      command: "code session"
+    };
+  }
+
+  emitAgentEvent(sender, requestId, { type: "status", status: "starting", message: "Starting Code session..." });
+  const session = await ensureOpenCodeSession(projectPath, modelSpec, permissionMode);
+  emitAgentEvent(sender, requestId, {
+    type: "session",
+    sessionID: session.id,
+    model: modelSpec.label,
+    permissionMode
+  });
+  const eventController = new AbortController();
+  streamOpenCodeEvents(sender, requestId, session.id, projectPath, eventController).catch(() => {});
+  const beforeMessages = await readOpenCodeMessages(session.id, projectPath);
+  const previousAssistantCount = beforeMessages.filter((message) => openCodeMessageRole(message) === "assistant").length;
+  const userPrompt = options.planMode
+    ? `Plan mode is enabled. First reason about the safest approach, then ask before making destructive changes.\n\n${promptText}`
+    : promptText;
+  const effectivePrompt = withCodeWorkbenchIdentity(userPrompt);
+
+  const slashMatch = /^\/([a-zA-Z0-9:_-]+)(?:\s+([\s\S]*))?$/.exec(promptText);
+  if (slashMatch) {
+    const commandName = slashMatch[1];
+    const commandArguments = slashMatch[2] || "";
+    const commandArgumentsWithIdentity = withCodeWorkbenchIdentity(commandArguments || `Run /${commandName} from Code Workbench.`);
+    const commands = await listOpenCodeCommands(projectPath).catch(() => []);
+    const commandExists = commands.some((command) => command.name === commandName);
+    if (commandExists) {
+      await runOpenCodeCommand(session.id, projectPath, {
+        agent: "build",
+        model: modelSpec.label,
+        command: commandName,
+        arguments: commandArgumentsWithIdentity
+      });
+    } else {
+      await sendOpenCodePrompt(session.id, projectPath, {
+        agent: "build",
+        modelRef: openCodeModelRef(modelSpec),
+        system: codeWorkbenchIdentity,
+        parts: [{ type: "text", text: effectivePrompt }]
+      });
+    }
+  } else {
+    await sendOpenCodePrompt(session.id, projectPath, {
+      agent: "build",
+      modelRef: openCodeModelRef(modelSpec),
+      system: codeWorkbenchIdentity,
+      parts: [{ type: "text", text: effectivePrompt }]
+    });
+  }
+  emitAgentEvent(sender, requestId, { type: "status", status: "running", message: "Code is working..." });
+
+  let lastText = "";
+  let lastToolSignature = "";
+  let lastTools = [];
+  let lastPermissionSignature = "";
+  let lastChangeAt = Date.now();
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 180000) {
+    await wait(700);
+    const messages = await readOpenCodeMessages(session.id, projectPath);
+    const text = bestAssistantText(messages, previousAssistantCount);
+    if (text !== lastText) {
+      lastText = text;
+      lastChangeAt = Date.now();
+      emitAgentEvent(sender, requestId, {
+        type: "text",
+        sessionID: session.id,
+        text: lastText
+      });
+    }
+
+    const tools = collectOpenCodeTools(messages, previousAssistantCount);
+    lastTools = tools;
+    const toolSignature = JSON.stringify(tools.map((tool) => [tool.id, tool.type, tool.status, tool.title]));
+    if (tools.length && toolSignature !== lastToolSignature) {
+      lastToolSignature = toolSignature;
+      emitAgentEvent(sender, requestId, {
+        type: "tools",
+        sessionID: session.id,
+        tools
+      });
+    }
+
+    const permissions = await readOpenCodePermissions(session.id, projectPath);
+    const permissionSignature = JSON.stringify(permissions.map((permission) => permission.id || permission.requestID || permission.permissionID || permission.permission));
+    if (permissions.length && permissionSignature !== lastPermissionSignature) {
+      lastPermissionSignature = permissionSignature;
+      emitAgentEvent(sender, requestId, {
+        type: "permissions",
+        sessionID: session.id,
+        permissions
+      });
+    }
+
+    const statusMap = await readOpenCodeSessionStatus(projectPath);
+    const status = statusMap?.[session.id]?.type || statusMap?.[session.id]?.status || "";
+    const stableFor = Date.now() - lastChangeAt;
+    const latestMessage = latestAssistantMessage(messages, previousAssistantCount);
+    const finishReason = latestMessage?.info?.finish || latestMessage?.finish || latestMessage?.message?.finish || "";
+    const hasText = Boolean(lastText.trim());
+    const canFinishWithText = hasText && (status === "idle" || stableFor > 10000);
+    const canFinishToolOnly = !hasText && tools.length && status === "idle" && stableFor > 10000 && finishReason !== "tool-calls";
+    if (canFinishWithText || canFinishToolOnly) {
+      const messageID = latestMessage?.info?.id || latestMessage?.id || latestMessage?.message?.id;
+      const diff = await readOpenCodeDiff(session.id, projectPath, messageID);
+      if (diff.length) {
+        emitAgentEvent(sender, requestId, {
+          type: "diff",
+          sessionID: session.id,
+          messageID,
+          diff
+        });
+      }
+      emitAgentEvent(sender, requestId, { type: "status", status: "done", message: "Code finished." });
+      eventController.abort();
+      return {
+        exitCode: 0,
+        stdout: lastText || `Code completed with ${tools.length} tool ${tools.length === 1 ? "step" : "steps"}.`,
+        stderr: "",
+        command: `code session ${session.id} (${modelSpec.label})`,
+        sessionID: session.id,
+        messageID,
+        diff,
+        tools,
+        providerID: modelSpec.providerID,
+        modelID: modelSpec.modelID
+      };
+    }
+  }
+
+  eventController.abort();
+  emitAgentEvent(sender, requestId, {
+    type: "status",
+    status: lastText ? "done" : "timeout",
+    message: lastText ? "Code finished." : "Code timed out."
+  });
+  return {
+    exitCode: lastText || lastTools.length ? 0 : 1,
+    stdout: lastText || (lastTools.length ? `Code completed with ${lastTools.length} tool ${lastTools.length === 1 ? "step" : "steps"}.` : ""),
+    stderr: lastText || lastTools.length ? "" : "Code session timed out before an assistant response was available.",
+    command: `code session ${session.id} (${modelSpec.label})`,
+    sessionID: session.id,
+    tools: lastTools,
+    providerID: modelSpec.providerID,
+    modelID: modelSpec.modelID
+  };
+}
+
 async function listFiles(base, current = "") {
   const dir = safeJoin(base, current);
   const entries = await fsp.readdir(dir, { withFileTypes: true });
+  const heavyDirectories = new Set(["build", "coverage", "dist", "node_modules"]);
   const result = [];
   for (const entry of entries) {
     if (entry.name.startsWith(".")) continue;
     const relativePath = path.join(current, entry.name);
     if (entry.isDirectory()) {
+      if (heavyDirectories.has(entry.name)) {
+        result.push({
+          name: entry.name,
+          path: relativePath,
+          type: "directory",
+          children: []
+        });
+        continue;
+      }
       result.push({
         name: entry.name,
         path: relativePath,
@@ -3524,6 +4649,151 @@ async function listFiles(base, current = "") {
     if (a.type !== b.type) return a.type === "directory" ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
+}
+
+const workspaceIgnoredDirs = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  ".vite",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules"
+]);
+
+function globToRegExp(pattern) {
+  const escaped = pattern.trim().replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  return new RegExp(`^${escaped}$`);
+}
+
+function patternMatches(relativePath, patternText) {
+  const patterns = String(patternText || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (!patterns.length) return true;
+  return patterns.some((pattern) => globToRegExp(pattern).test(relativePath));
+}
+
+async function walkWorkspaceFiles(base, current = "", files = []) {
+  const dir = safeJoin(base, current);
+  let entries = [];
+  try {
+    entries = await fsp.readdir(dir, { withFileTypes: true });
+  } catch {
+    return files;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith(".") && entry.name !== ".env") continue;
+    const relativePath = path.join(current, entry.name);
+    if (entry.isDirectory()) {
+      if (workspaceIgnoredDirs.has(entry.name)) continue;
+      await walkWorkspaceFiles(base, relativePath, files);
+      continue;
+    }
+    if (entry.isFile()) files.push(relativePath);
+  }
+  return files;
+}
+
+async function searchWorkspace(base, payload = {}) {
+  const query = String(payload.query || "").trim();
+  if (!query) return [];
+  const include = payload.include || "";
+  const exclude = payload.exclude || "";
+  const flags = payload.matchCase ? "g" : "gi";
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const source = payload.regex ? query : escaped;
+  const word = payload.wholeWord ? `\\b(?:${source})\\b` : source;
+  let matcher;
+  try {
+    matcher = new RegExp(word, flags);
+  } catch {
+    matcher = new RegExp(escaped, flags);
+  }
+  const files = await walkWorkspaceFiles(base);
+  const results = [];
+  for (const relativePath of files) {
+    if (!patternMatches(relativePath, include)) continue;
+    if (exclude && patternMatches(relativePath, exclude)) continue;
+    const fullPath = safeJoin(base, relativePath);
+    const stat = await fsp.stat(fullPath);
+    if (stat.size > 1024 * 1024) continue;
+    let content = "";
+    try {
+      content = await fsp.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    const lines = content.split(/\r?\n/);
+    for (let index = 0; index < lines.length; index += 1) {
+      matcher.lastIndex = 0;
+      const match = matcher.exec(lines[index]);
+      if (!match) continue;
+      results.push({
+        path: relativePath,
+        line: index + 1,
+        column: match.index + 1,
+        preview: lines[index].trim()
+      });
+      if (results.length >= 500) return results;
+    }
+  }
+  return results;
+}
+
+async function symbolSearch(base, query = "") {
+  const needle = String(query || "").trim().toLowerCase();
+  const files = await walkWorkspaceFiles(base);
+  const symbols = [];
+  const symbolPattern = /^\s*(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|var)\s+([A-Za-z_$][\w$]*)|^\s*([A-Za-z_$][\w$]*)\s*[:=]\s*(?:async\s*)?(?:\([^)]*\)\s*=>|function\b)/;
+  for (const relativePath of files) {
+    if (!/\.(js|jsx|ts|tsx|mjs|cjs|py|java|c|cpp|cs|go|rs|php|rb)$/.test(relativePath)) continue;
+    const fullPath = safeJoin(base, relativePath);
+    const stat = await fsp.stat(fullPath);
+    if (stat.size > 1024 * 1024) continue;
+    let content = "";
+    try {
+      content = await fsp.readFile(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+    content.split(/\r?\n/).forEach((line, index) => {
+      const match = symbolPattern.exec(line);
+      const name = match?.[1] || match?.[2];
+      if (!name) return;
+      if (needle && !name.toLowerCase().includes(needle)) return;
+      symbols.push({
+        name,
+        path: relativePath,
+        line: index + 1,
+        preview: line.trim()
+      });
+    });
+    if (symbols.length >= 300) break;
+  }
+  return symbols;
+}
+
+async function gitStatus(workspacePath) {
+  const status = await runCommand(workspacePath, "git status --short --branch");
+  const branchLine = `${status.stdout || ""}${status.stderr || ""}`.split(/\r?\n/)[0] || "";
+  const branch = branchLine.replace(/^##\s*/, "").split("...")[0] || "no branch";
+  const changes = `${status.stdout || ""}`
+    .split(/\r?\n/)
+    .slice(1)
+    .filter(Boolean)
+    .map((line) => ({
+      status: line.slice(0, 2).trim() || "M",
+      path: line.slice(3).trim()
+    }));
+  return {
+    ok: status.exitCode === 0,
+    branch,
+    changes,
+    message: status.exitCode === 0 ? "" : (status.stderr || status.stdout || "Not a git repository.")
+  };
 }
 
 async function getLessons() {
@@ -3823,6 +5093,18 @@ ipcMain.handle("roadmaps:advance", async (_event, lessonId, skipped = false) => 
 
 ipcMain.handle("files:list", (_event, workspacePath) => listFiles(workspacePath));
 
+ipcMain.handle("project:default", async () => defaultProjectPath);
+
+ipcMain.handle("project:open", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Open project folder",
+    defaultPath: os.homedir(),
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (result.canceled || !result.filePaths[0]) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle("files:read", async (_event, workspacePath, relativePath) => {
   return fsp.readFile(safeJoin(workspacePath, relativePath), "utf8");
 });
@@ -3834,6 +5116,51 @@ ipcMain.handle("files:write", async (_event, workspacePath, relativePath, conten
   return true;
 });
 
+ipcMain.handle("files:createFile", async (_event, workspacePath, relativePath, content = "") => {
+  const target = safeJoin(workspacePath, relativePath);
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  await fsp.writeFile(target, content, { encoding: "utf8", flag: "wx" });
+  return true;
+});
+
+ipcMain.handle("files:createFolder", async (_event, workspacePath, relativePath) => {
+  await fsp.mkdir(safeJoin(workspacePath, relativePath), { recursive: true });
+  return true;
+});
+
+ipcMain.handle("files:delete", async (_event, workspacePath, relativePath) => {
+  await fsp.rm(safeJoin(workspacePath, relativePath), { recursive: true, force: true });
+  return true;
+});
+
+ipcMain.handle("files:rename", async (_event, workspacePath, fromPath, toPath) => {
+  await fsp.mkdir(path.dirname(safeJoin(workspacePath, toPath)), { recursive: true });
+  await fsp.rename(safeJoin(workspacePath, fromPath), safeJoin(workspacePath, toPath));
+  return true;
+});
+
+ipcMain.handle("files:duplicate", async (_event, workspacePath, fromPath, toPath) => {
+  const source = safeJoin(workspacePath, fromPath);
+  const target = safeJoin(workspacePath, toPath);
+  await fsp.mkdir(path.dirname(target), { recursive: true });
+  await fsp.cp(source, target, { recursive: true, errorOnExist: true, force: false });
+  return true;
+});
+
+ipcMain.handle("workspace:search", (_event, workspacePath, payload) => searchWorkspace(workspacePath, payload));
+
+ipcMain.handle("workspace:symbols", (_event, workspacePath, query) => symbolSearch(workspacePath, query));
+
+ipcMain.handle("git:status", (_event, workspacePath) => gitStatus(workspacePath));
+
+ipcMain.handle("git:command", async (_event, workspacePath, command) => {
+  const allowed = new Set(["fetch", "pull", "push", "status"]);
+  if (!allowed.has(command)) {
+    return { exitCode: 1, stdout: "", stderr: "Unsupported git command.", command: `git ${command}` };
+  }
+  return runCommand(workspacePath, `git ${command}`);
+});
+
 ipcMain.handle("progress:load", loadProgress);
 
 ipcMain.handle("progress:save", async (_event, progress) => {
@@ -3841,6 +5168,313 @@ ipcMain.handle("progress:save", async (_event, progress) => {
 });
 
 ipcMain.handle("progress:record", async (_event, event) => recordLearningEvent(event));
+
+ipcMain.handle("opencode:info", async () => {
+  const command = opencodeCommand("--version");
+  const result = await runCommand(rootDir, command);
+  return {
+    installed: result.exitCode === 0,
+    version: result.stdout.trim() || result.stderr.trim(),
+    bin: opencodeBin(),
+    command: "opencode"
+  };
+});
+
+ipcMain.handle("opencode:models", async (_event, provider) => {
+  const command = opencodeCommand(`models${provider ? ` ${provider}` : ""}`);
+  const result = await runCommand(rootDir, command);
+  return {
+    ...result,
+    models: `${result.stdout || ""}${result.stderr || ""}`
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  };
+});
+
+ipcMain.handle("opencode:providers", async () => [
+  { id: "ollama", label: "Ollama Local", kind: "local", command: "/models ollama" },
+  { id: "ollama-cloud", label: "Ollama Cloud", kind: "cloud", command: "/connect Ollama Cloud" },
+  { id: "opencode", label: "Code Zen", kind: "cloud", command: "/connect Code Zen" },
+  { id: "openrouter", label: "OpenRouter", kind: "cloud", command: "/connect OpenRouter" },
+  { id: "z-ai", label: "Z.AI", kind: "cloud", command: "/connect Z.AI" },
+  { id: "zenmux", label: "ZenMux", kind: "cloud", command: "/connect ZenMux" },
+  { id: "lmstudio", label: "LM Studio", kind: "local", command: "/connect LM Studio" },
+  { id: "llama.cpp", label: "llama.cpp", kind: "local", command: "/connect llama.cpp" },
+  { id: "github-copilot", label: "GitHub Copilot", kind: "cloud", command: "/connect GitHub Copilot" },
+  { id: "anthropic", label: "Anthropic", kind: "cloud", command: "/connect Anthropic" },
+  { id: "openai", label: "OpenAI", kind: "cloud", command: "/connect OpenAI" },
+  { id: "google-vertex", label: "Google Vertex AI", kind: "cloud", command: "/connect Google Vertex AI" }
+]);
+
+ipcMain.handle("opencode:syncOllama", async (_event, payload = {}) => {
+  const projectPath = payload.projectPath || rootDir;
+  const models = Array.isArray(payload.models) ? payload.models.filter(Boolean) : [];
+  const configPath = path.join(projectPath, "opencode.json");
+  const existing = await readJson(configPath, {});
+  const modelMap = Object.fromEntries(
+    models.map((model) => [
+      model,
+      {
+        name: model,
+        limit: {
+          context: 32768,
+          output: 8192
+        }
+      }
+    ])
+  );
+  const next = {
+    "$schema": "https://opencode.ai/config.json",
+    ...existing,
+    provider: {
+      ...(existing.provider || {}),
+      ollama: {
+        ...(existing.provider?.ollama || {}),
+        npm: "@ai-sdk/openai-compatible",
+        name: "Ollama (local)",
+        options: {
+          ...(existing.provider?.ollama?.options || {}),
+          baseURL: "http://localhost:11434/v1"
+        },
+        models: {
+          ...(existing.provider?.ollama?.models || {}),
+          ...modelMap
+        }
+      }
+    },
+    model: existing.model || (models[0] ? `ollama/${models[0]}` : undefined),
+    small_model: existing.small_model || (models[0] ? `ollama/${models[0]}` : undefined)
+  };
+  if (!next.model) delete next.model;
+  if (!next.small_model) delete next.small_model;
+  await writeJson(configPath, next);
+  return {
+    ok: true,
+    path: configPath,
+    modelCount: models.length,
+    defaultModel: next.model || ""
+  };
+});
+
+ipcMain.handle("opencode:command", async (_event, payload = {}) => {
+  const projectPath = payload.projectPath || rootDir;
+  if (payload.mode === "run") {
+    return runGuiAgentCommand(projectPath, payload.model || "", payload.prompt || "", _event.sender, payload);
+  }
+  return {
+    exitCode: 0,
+    stdout: opencodeCommand(`${payload.model ? ` --model ${JSON.stringify(payload.model)}` : ""} ${JSON.stringify(projectPath)}`),
+    stderr: "",
+    command: "opencode command preview"
+  };
+});
+
+ipcMain.handle("opencode:sessions", async (_event, payload = {}) => {
+  return listOpenCodeSessions(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionList", async (_event, payload = {}) => {
+  return listOpenCodeSessions(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionGet", async (_event, payload = {}) => {
+  return getOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:session", async (_event, payload = {}) => {
+  return getOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionCreate", async (_event, payload = {}) => {
+  return createOpenCodeSessionFromPayload(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:sessionStart", async (_event, payload = {}) => {
+  return createOpenCodeSessionFromPayload(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:sessionFork", async (_event, payload = {}) => {
+  return forkOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:sessionUpdate", async (_event, payload = {}) => {
+  return updateOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir, payload.update || payload);
+});
+
+ipcMain.handle("opencode:sessionDelete", async (_event, payload = {}) => {
+  return deleteOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:commands", async (_event, payload = {}) => {
+  return listOpenCodeCommands(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:providerState", async (_event, payload = {}) => {
+  return readOpenCodeProviderState(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:providerAuth", async (_event, payload = {}) => {
+  return readOpenCodeProviderAuth(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:providerAuthorize", async (_event, payload = {}) => {
+  return authorizeOpenCodeProvider(
+    payload.providerID,
+    payload.method || 0,
+    payload.inputs || {},
+    payload.projectPath || rootDir
+  );
+});
+
+ipcMain.handle("opencode:providerCallback", async (_event, payload = {}) => {
+  return callbackOpenCodeProvider(
+    payload.providerID,
+    payload.method || 0,
+    payload.code || "",
+    payload.projectPath || rootDir
+  );
+});
+
+ipcMain.handle("opencode:providerApiKey", async (_event, payload = {}) => {
+  return saveOpenCodeProviderApiKey(payload.providerID, payload.key || "", payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:messages", async (_event, payload = {}) => {
+  return readOpenCodeMessages(payload.sessionID, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionMessages", async (_event, payload = {}) => {
+  return readOpenCodeMessages(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:abort", async (_event, payload = {}) => {
+  return abortOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionAbort", async (_event, payload = {}) => {
+  return abortOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:eventStreamStart", async (_event, payload = {}) => {
+  return startOpenCodeEventStream(_event.sender, payload);
+});
+
+ipcMain.handle("opencode:eventsStart", async (_event, payload = {}) => {
+  return startOpenCodeEventStream(_event.sender, payload);
+});
+
+ipcMain.handle("opencode:eventStreamStop", async (_event, payload = {}) => {
+  return stopOpenCodeEventStream(payload.streamID || payload.requestId || payload);
+});
+
+ipcMain.handle("opencode:eventsStop", async (_event, payload = {}) => {
+  return stopOpenCodeEventStream(payload.streamID || payload.requestId || payload);
+});
+
+ipcMain.handle("opencode:permissions", async (_event, payload = {}) => {
+  return readOpenCodePermissions(payload.sessionID, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:permissionList", async (_event, payload = {}) => {
+  return readOpenCodePermissions(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:permissionReply", async (_event, payload = {}) => {
+  return replyOpenCodePermission(
+    payload.sessionID,
+    payload.requestID || payload.permissionID || payload.id,
+    payload.reply || payload.response || "once",
+    payload.projectPath || rootDir,
+    payload.message
+  );
+});
+
+ipcMain.handle("opencode:diff", async (_event, payload = {}) => {
+  return readOpenCodeDiff(payload.sessionID || payload.id, payload.projectPath || rootDir, payload.messageID);
+});
+
+ipcMain.handle("opencode:sessionDiff", async (_event, payload = {}) => {
+  return readOpenCodeDiff(payload.sessionID || payload.id, payload.projectPath || rootDir, payload.messageID);
+});
+
+ipcMain.handle("opencode:todo", async (_event, payload = {}) => {
+  return readOpenCodeTodo(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionTodo", async (_event, payload = {}) => {
+  return readOpenCodeTodo(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:prompt", async (_event, payload = {}) => {
+  return runGuiAgentCommand(
+    payload.projectPath || rootDir,
+    payload.model || payload.modelRef || "",
+    payload.prompt || payload.text || "",
+    _event.sender,
+    {
+      requestId: payload.requestId,
+      permissionMode: payload.permissionMode,
+      planMode: payload.planMode
+    }
+  );
+});
+
+ipcMain.handle("opencode:sessionPrompt", async (_event, payload = {}) => {
+  return runGuiAgentCommand(
+    payload.projectPath || rootDir,
+    payload.model || payload.modelRef || "",
+    payload.prompt || payload.text || "",
+    _event.sender,
+    {
+      requestId: payload.requestId,
+      permissionMode: payload.permissionMode,
+      planMode: payload.planMode
+    }
+  );
+});
+
+ipcMain.handle("opencode:sessionCommand", async (_event, payload = {}) => {
+  const sessionID = payload.sessionID || payload.id;
+  if (!sessionID) {
+    return { exitCode: 1, stdout: "", stderr: "No active Code session.", command: payload.command || "" };
+  }
+  const result = await runOpenCodeCommand(sessionID, payload.projectPath || rootDir, payload);
+  const text = latestAssistantText([result], 0) || JSON.stringify(result, null, 2);
+  return { exitCode: 0, stdout: text, stderr: "", command: `/${payload.command || ""}` };
+});
+
+ipcMain.handle("opencode:commandList", async (_event, payload = {}) => {
+  return listOpenCodeCommands(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:commandRun", async (_event, payload = {}) => {
+  return runOpenCodeCommand(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:shell", async (_event, payload = {}) => {
+  return runOpenCodeShell(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:shellRun", async (_event, payload = {}) => {
+  return runOpenCodeShell(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:revert", async (_event, payload = {}) => {
+  return revertOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:sessionRevert", async (_event, payload = {}) => {
+  return revertOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:unrevert", async (_event, payload = {}) => {
+  return unrevertOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionUnrevert", async (_event, payload = {}) => {
+  return unrevertOpenCodeSession(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
 
 async function ollamaFetch(route, options = {}) {
   const response = await fetch(`http://localhost:11434${route}`, options);

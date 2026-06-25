@@ -2,6 +2,8 @@ node_modules/
 dist/
 .vite/
 .cache/
+.android-build-tools/
+tutorial-ide-debug.apk
 
 *.log
 npm-debug.log*
@@ -19,4 +21,3 @@ Thumbs.db
 coverage/
 playwright-report/
 test-results/
-

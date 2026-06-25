@@ -1,0 +1,65 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "baseURL": "http://localhost:11434/v1"
+      },
+      "models": {
+        "nemotron-3-nano:30b-cloud": {
+          "name": "nemotron-3-nano:30b-cloud",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "gemma4:31b-cloud": {
+          "name": "gemma4:31b-cloud",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "qwen2.5:latest": {
+          "name": "qwen2.5:latest",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "kimi-k2.6:cloud": {
+          "name": "kimi-k2.6:cloud",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "gpt-oss:120b-cloud": {
+          "name": "gpt-oss:120b-cloud",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "deepseek-coder:6.7b": {
+          "name": "deepseek-coder:6.7b",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "llama3.2:3b": {
+          "name": "llama3.2:3b",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+  "model": "ollama/nemotron-3-nano:30b-cloud",
+  "small_model": "ollama/nemotron-3-nano:30b-cloud"
+}

@@ -1,34 +1,100 @@
-# Tutorial IDE Progress Memory
+# Tutorial IDE / Code Workbench Progress Memory
 
-This file is a backup context memory for the local `tutorial-ide` project. It records the current product direction, implemented architecture, major fixes, and prompt system so future work can resume without rediscovering everything.
+This file is backup context memory for the local `tutorial-ide` project. It records the current product direction, implemented architecture, major fixes, and historical notes so future work can resume without rediscovering everything.
 
-## Product Goal
+## Current Product Direction
 
-Tutorial IDE is a desktop learning IDE inspired by VS Code, focused on personal coding development. It uses:
+As of 2026-06-25, the learning-roadmap and AI tutor direction is deprecated.
 
-- Electron desktop shell.
-- React + TypeScript + Vite UI.
-- Monaco editor.
-- xterm.js terminal.
-- Local Ollama tutor through `http://localhost:11434`.
-- Node/Electron backend for files, generated lessons, terminal commands, progress, and Ollama requests.
+New concept:
 
-The app is for personal development first, not job/interview preparation unless the learner explicitly asks for that.
+- A VS Code-like code editor with a Codex-style GenAI coding agent.
+- The local product name is **Code**.
+- The app owns the GUI. Do not make the upstream terminal UI the primary product surface.
+- Do not launch or embed the upstream terminal UI from product buttons; the right panel must be a Codex-style GUI chat backed by the engine.
+- The full upstream coding-agent source has been vendored into `vendor/code` for engine integration.
+- Preserve the upstream provider/model behavior instead of inventing a separate provider system.
+- Ollama local/cloud models are first-class in the UI.
+- Provider/model values use engine style: `provider/model`.
+- Examples:
+  - `ollama/qwen2.5:latest`
+  - `ollama/nemotron-3-nano:30b-cloud`
+  - `openrouter/moonshotai/kimi-k2`
+- OpenRouter, Zen, Z.AI, ZenMux, LM Studio, llama.cpp, GitHub Copilot, Anthropic, OpenAI, and other providers should remain accessible through provider-native engine commands.
 
 ## Current UX Shape
 
-The app has:
+The app is now a Code workbench:
 
-- Left activity bar with Explorer, Lessons, Preview, Tutor, and Run icons.
-- Left sidebar with Learning Workspace, Create Roadmap interview, Roadmaps, Tutorial Parts, and Files.
+- Left activity bar for Explorer, Code Agent, Terminal, and Providers.
+- Left sidebar with project picker and project file explorer.
 - Main editor workspace with Monaco tabs.
-- Preview view opened from the left nav. Preview hides tutor and bottom terminal panels.
-- Top actions: Save, Guide, Run, Check.
-- Guide is a right-side drawer/modal, not a permanent bottom panel.
-- Bottom panel is terminal-only.
-- Right tutor panel is visible in normal editor mode.
-- Neon separator rails replaced visible resize grip icons.
-- Sidebar lower panels were polished with VS Code-style empty states.
+- Bottom terminal powered by xterm.js and `node-pty`.
+- Right Code agent panel with:
+  - Engine status/version.
+  - Ollama local model discovery.
+  - Manual `provider/model` entry for OpenRouter, Zen, Z.AI, etc.
+  - Provider reference cards showing `/connect` commands.
+  - Prompt runner through the engine command runner.
+  - GUI chat transcript and composer. No terminal UI launcher.
+- Roadmap, lesson, guide, and beginner tutor UI are no longer part of the visible product.
+
+## Code Engine Integration Notes
+
+- `opencode-ai@1.17.10` is installed.
+- Full source fork is vendored at `vendor/code` without upstream `.git` history.
+- `vendor/code/README.md` documents local Code branding and integration direction.
+- `vendor/code/README.upstream.md` preserves the upstream README for attribution.
+- `vendor/code/FORK.md` records what was renamed and what remains compatibility-sensitive.
+- `vendor/code/packages/opencode/bin/code` is a local CLI wrapper beside the compatibility wrapper.
+- `src/App.tsx` has been rewritten around project/editor/Code workflows.
+- `electron/main.cjs` exposes:
+  - `project:default`
+  - `project:open`
+  - `opencode:info`
+  - `opencode:providers`
+  - `opencode:models`
+  - `opencode:syncOllama`
+  - `opencode:command`
+- `opencode:syncOllama` writes/merges `opencode.json` into the current project with:
+  - provider `ollama`
+  - npm package `@ai-sdk/openai-compatible`
+  - `baseURL: http://localhost:11434/v1`
+  - discovered Ollama models
+- The IPC namespace and some internal package/config names still use upstream compatibility identifiers. Do not blindly global-rename them; replace subsystem-by-subsystem with tests.
+- Direct engine smoke test passed:
+
+```bash
+OPENCODE_CONFIG_CONTENT='{"provider":{"ollama":{"npm":"@ai-sdk/openai-compatible","name":"Ollama (local)","options":{"baseURL":"http://localhost:11434/v1"},"models":{"qwen2.5:latest":{"name":"qwen2.5:latest"}}}},"model":"ollama/qwen2.5:latest"}' code models ollama
+```
+
+Output:
+
+```text
+ollama/qwen2.5:latest
+```
+
+Build verification after pivot:
+
+```bash
+npm run build
+node --check electron/main.cjs
+node --check electron/preload.cjs
+```
+
+All passed.
+
+Latest verification after vendoring Code source:
+
+```bash
+npm run build
+```
+
+Passed on 2026-06-25. Vite dev server ignores `vendor/code/**` so the vendored engine source does not trigger reload storms during GUI development.
+
+## Deprecated Learning IDE Context
+
+Everything below documents the previous learning IDE direction for historical context only. Do not revive it unless the user explicitly asks.
 
 ## Important User Preferences
 
@@ -315,6 +381,50 @@ Known warning:
 
 - Vite reports a large chunk warning. This is existing/expected and not currently blocking.
 
+## Android Debug Build Context
+
+Android packaging was added with Capacitor so the Vite UI can be tested on a phone.
+
+Important files:
+
+- `capacitor.config.ts`
+- `android/`
+- `src/browserApi.ts`
+
+Important behavior:
+
+- Desktop Electron still uses `window.tutorialIde` from `electron/preload.cjs`.
+- Android/WebView uses `createBrowserTutorialIde()` when Electron IPC is unavailable.
+- The browser fallback stores demo files/progress in `localStorage`.
+- The Android build is for UI and flow testing. It does not provide real `node-pty`, real desktop filesystem access, or desktop Ollama IPC.
+
+Local build tooling:
+
+- Local JDK: `.android-build-tools/jdk`
+- Local Android SDK: `.android-build-tools/sdk`
+- These are ignored by git because they are large machine-local tools.
+
+Build command:
+
+```bash
+npm run android:debug
+```
+
+Latest debug APK:
+
+```text
+/home/user029/my-project/tutorial-ide/tutorial-ide-debug.apk
+/home/user029/my-project/tutorial-ide/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Last Android verification:
+
+```bash
+npm run android:debug
+```
+
+Result: passed, APK generated.
+
 ## Important Failure Cases To Guard Against
 
 Hard failures the backend/UI should prevent:
@@ -345,4 +455,3 @@ The user briefly asked about another project:
   - `https://www.figma.com/design/lKkWrMxpSkuO5XX2O2ZtIP/ProducerWave--Copy-?node-id=467-15965&m=dev`
 
 That turn was interrupted before implementation. No confirmed changes for ProducerWave should be assumed from this memory unless inspected.
-
