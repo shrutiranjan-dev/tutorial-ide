@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type CSSProperties, type Dispatch, type MouseEvent as ReactMouseEvent, type ReactNode, type SetStateAction } from "react";
 import { useToast } from "./ToastContext";
 import { withApiError } from "./apiErrorHandler";
 import Editor, { type OnMount } from "@monaco-editor/react";
@@ -23,6 +23,7 @@ import {
   History,
   ListTodo,
   Maximize2,
+  Minimize2,
   MonitorPlay,
   MoreHorizontal,
   PanelBottomClose,
@@ -45,11 +46,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import type {
   AgentCommandInfo,
   AgentDiffFile,
+  AgentEngineStatusResult,
   AgentPermissionRequest,
   AgentProviderAuthMap,
   AgentProviderState,
   AgentQuestion,
   AgentRuntimeEvent,
+  AgentTodoItem,
   AgentToolPart,
   CommandResult,
   CredentialInfo,
@@ -66,6 +69,20 @@ import type {
   SavedPermission,
   SkillInfo
 } from "./types";
+import {
+  agentRuntimeReducer,
+  createInitialAgentRuntimeState,
+  deriveTodosFromUiMessages,
+  type AgentActivityChip as RuntimeAgentActivityChip,
+  type AgentUiMessage
+} from "./agentRuntime";
+import {
+  DiffChangeCard as AgentDiffChangeCard,
+  PermissionRequestCard as AgentPermissionRequestCard,
+  TodoListPanel,
+  ToolActivityCard as AgentToolActivityCard,
+  permissionRequestKey
+} from "./components/agent";
 import { createBrowserTutorialIde } from "./browserApi";
 import { extensionIcon, languageFromPath } from "./utils";
 
@@ -92,6 +109,13 @@ type ActivityView = "explorer" | "search" | "source" | "debug" | "extensions" | 
 type BottomPanel = "terminal" | "problems" | "output" | "debug" | "aiLogs";
 type OverlayMode = "command" | "quickOpen" | "symbols" | null;
 type AgentContextMode = "selection" | "file" | "openTabs" | "workspace";
+type EditablePermissionRule = {
+  id: string;
+  permission: string;
+  pattern: string;
+  action: PermissionEffect;
+  description?: string;
+};
 
 type SearchResult = {
   path: string;
@@ -114,47 +138,74 @@ type GitState = {
   message: string;
 };
 
-type AgentMessage = {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-  meta?: string;
-  command?: string;
-  exitCode?: number;
-  requestId?: string;
-  sessionID?: string;
-  messageID?: string;
-  pending?: boolean;
-  status?: string;
-  tools?: AgentToolPart[];
-  diff?: AgentDiffFile[];
-  permissions?: AgentPermissionRequest[];
-};
+type AgentMessage = AgentUiMessage;
 
 type AgentSessionInfo = {
   id: string;
   title?: string;
+  summary?: unknown;
   time?: { created?: number; updated?: number };
 };
 
-type AgentActivityChip = {
-  id: string;
-  label: string;
-  tone?: "info" | "success" | "warn" | "danger";
-  detail?: string;
-  sessionID?: string;
-  count?: number;
+type AgentActivityChip = RuntimeAgentActivityChip;
+
+type AgentParitySnapshot = {
+  loading: boolean;
+  updatedAt?: string;
+  sessionContext?: { ok: boolean; context?: unknown; error?: string };
+  vcsStatus?: { ok: boolean; status?: unknown; fallback?: string; error?: string };
+  vcsDiff?: { ok: boolean; diff?: unknown; fallback?: string; command?: string; error?: string };
+  globalConfig?: { ok: boolean; config?: unknown; error?: string };
 };
 
-type AgentTodoItem = {
-  id: string;
-  text: string;
-  status: "pending" | "in_progress" | "done";
+type AgentSessionContextSummary = {
+  sessionID: string;
+  title: string;
+  summaryText: string;
+  messageCount: number;
+  toolCount: number;
+  diffCount: number;
+  permissionCount: number;
+  todoCount: number;
+  tokenCount?: number;
+  contextLimit?: number;
+  updatedLabel: string;
+  recent: Array<{ role: AgentMessage["role"]; text: string }>;
+  unavailable?: string;
+};
+
+type AgentMcpSnapshot = {
+  serverCount: number;
+  activeServerCount: number;
+  integrationCount: number;
+  servers: Array<{ name: string; type: string; disabled: boolean }>;
+  integrations: Array<{ id: string; name: string; connected: boolean }>;
+};
+
+type DiagnosticsSnapshot = {
+  loading: boolean;
+  updatedAt?: string;
+  formatter?: AgentEngineStatusResult;
+  lsp?: AgentEngineStatusResult;
+  error?: string;
+};
+
+type GitActionAvailability = {
+  diff: boolean;
+  stage: boolean;
+  unstage: boolean;
+  applyPatch: boolean;
+};
+
+type OptionalGitBridge = typeof api.git & {
+  diff?: (workspacePath: string, path?: string) => Promise<CommandResult | string | { ok?: boolean; error?: string; stdout?: string; stderr?: string; command?: string; exitCode?: number }>;
+  stage?: (workspacePath: string, path?: string) => Promise<CommandResult | { ok?: boolean; error?: string; stdout?: string; stderr?: string; command?: string; exitCode?: number }>;
+  unstage?: (workspacePath: string, path?: string) => Promise<CommandResult | { ok?: boolean; error?: string; stdout?: string; stderr?: string; command?: string; exitCode?: number }>;
 };
 
 type OptionalOpenCodeBridge = typeof api.opencode & {
-  startSession?: (payload: { projectPath: string; model?: string; sessionID?: string }) => Promise<{ sessionID?: string; id?: string; providerID?: string; modelID?: string }>;
-  prompt?: (payload: { projectPath: string; sessionID?: string; model?: string; prompt: string; requestId?: string; permissionMode?: string; permissionRules?: Array<{ action?: string; resource?: string; effect: string; description?: string }>; planMode?: boolean }) => Promise<CommandResult & { admitted?: boolean }>;
+  startSession?: (payload: { projectPath: string; model?: string; sessionID?: string; agent?: string }) => Promise<{ sessionID?: string; id?: string; providerID?: string; modelID?: string }>;
+  prompt?: (payload: { projectPath: string; sessionID?: string; model?: string; agent?: string; prompt: string; requestId?: string; permissionMode?: string; permissionRules?: PermissionRule[]; planMode?: boolean }) => Promise<CommandResult & { admitted?: boolean }>;
   fork?: (payload: { projectPath: string; sessionID: string; messageID?: string }) => Promise<{ sessionID?: string; id?: string }>;
   startEvents?: (payload: { projectPath: string; sessionID?: string; requestId?: string }) => Promise<{ streamID?: string; subscriptionID?: string; id?: string }>;
   stopEvents?: (payload: string | { streamID?: string; subscriptionID?: string; requestId?: string }) => Promise<void>;
@@ -165,6 +216,27 @@ type OptionalOpenCodeBridge = typeof api.opencode & {
   credentials?: (payload: { projectPath: string }) => Promise<CredentialInfo[]>;
   credentialUpdate?: (payload: CredentialUpdatePayload) => Promise<{ ok: boolean }>;
   credentialDelete?: (payload: CredentialDeletePayload) => Promise<{ ok: boolean }>;
+  sessionSwitchModel?: (payload: { projectPath: string; sessionID: string; model: string }) => Promise<{ ok: boolean; error?: string }>;
+  sessionSwitchAgent?: (payload: { projectPath: string; sessionID: string; agent: string }) => Promise<{ ok: boolean; error?: string }>;
+  readMCPConfig?: (payload: { projectPath: string }) => Promise<{ ok: boolean; mcpConfig?: { servers: Record<string, unknown> }; error?: string }>;
+  writeMCPConfig?: (payload: { projectPath: string; mcpConfig: { servers: Record<string, unknown> } }) => Promise<{ ok: boolean; error?: string }>;
+  mcpConnect?: (payload: { projectPath: string; name: string }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  mcpDisconnect?: (payload: { projectPath: string; name: string }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+  sessionContext?: (payload: { projectPath: string; sessionID: string }) => Promise<{ ok: boolean; context?: unknown; error?: string }>;
+  vcsStatus?: (payload: { projectPath: string }) => Promise<{ ok: boolean; status?: unknown; fallback?: string; error?: string }>;
+  vcsDiff?: (payload: { projectPath: string; staged?: boolean }) => Promise<{ ok: boolean; diff?: unknown; fallback?: string; command?: string; error?: string }>;
+  vcsStage?: (payload: { projectPath: string; files?: string[]; file?: string }) => Promise<{ ok: boolean; error?: string; stdout?: string; stderr?: string; command?: string }>;
+  vcsUnstage?: (payload: { projectPath: string; files?: string[]; file?: string }) => Promise<{ ok: boolean; error?: string; stdout?: string; stderr?: string; command?: string }>;
+  vcsPatch?: (payload: { projectPath: string; patch: string; check?: boolean; dryRun?: boolean }) => Promise<{ ok: boolean; source?: string; error?: string; stdout?: string; stderr?: string; command?: string }>;
+  vcsApply?: (payload: { projectPath: string; patch: string; check?: boolean; dryRun?: boolean }) => Promise<{ ok: boolean; source?: string; error?: string; stdout?: string; stderr?: string; command?: string }>;
+  globalConfig?: (payload: { projectPath: string }) => Promise<{ ok: boolean; config?: unknown; error?: string }>;
+  writeGlobalConfig?: (payload: { projectPath: string; config: unknown }) => Promise<{ ok: boolean; config?: unknown; error?: string }>;
+  copyProject?: (payload: { sourcePath: string; destPath: string }) => Promise<{ ok: boolean; error?: string }>;
+  listProjects?: (payload: { projectsDir: string }) => Promise<{ ok: boolean; projects?: string[]; error?: string }>;
+  cli?: (payload: { projectPath: string; args: string[] }) => Promise<CommandResult & { ok?: boolean; error?: string }>;
+  mcpIntegrations?: (payload: { projectPath: string }) => Promise<{ ok: boolean; integrations: unknown[]; error?: string }>;
+  health?: (projectPath: string) => Promise<{ healthy: boolean; [key: string]: unknown }>;
+  location?: (projectPath: string) => Promise<Record<string, unknown>>;
   // Q&A methods
   questionRequests?: (payload: { projectPath: string; sessionID?: string }) => Promise<AgentQuestion[]>;
   sessionQuestions?: (payload: { projectPath: string; sessionID: string }) => Promise<AgentQuestion[]>;
@@ -177,10 +249,17 @@ type OptionalOpenCodeBridge = typeof api.opencode & {
   // Saved permissions methods
   savedPermissions?: (payload: { projectPath: string }) => Promise<SavedPermission[]>;
   deleteSavedPermission?: (payload: { projectPath: string; id: string }) => Promise<{ ok: boolean }>;
+  sessionCompact?: (payload: { projectPath: string; sessionID: string }) => Promise<{ ok: boolean; error?: string }>;
+  sessionWait?: (payload: { projectPath: string; sessionID: string; timeout?: number; timeoutMS?: number }) => Promise<{ ok?: boolean; error?: string; result?: unknown }>;
+  deleteSession?: (payload: { projectPath: string; sessionID: string }) => Promise<boolean>;
+  sessionDelete?: (payload: { projectPath: string; sessionID: string }) => Promise<boolean>;
+  unrevert?: (payload: { projectPath: string; sessionID: string }) => Promise<unknown>;
+  sessionUnrevert?: (payload: { projectPath: string; sessionID: string }) => Promise<unknown>;
 };
 
 type WorkspaceState = {
   projectPath?: string;
+  recentProjects?: string[];
   tabs?: string[];
   activePath?: string;
   activeActivity?: ActivityView;
@@ -193,6 +272,9 @@ type WorkspaceState = {
   agentOpen?: boolean;
   minimap?: boolean;
   selectedModel?: string;
+  agentPermissionMode?: string;
+  granularPermissions?: Record<string, PermissionEffect>;
+  customPermissionRules?: EditablePermissionRule[];
   cursorPositions?: Record<string, { lineNumber: number; column: number }>;
 };
 
@@ -211,18 +293,82 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+import { getItem, setItem } from "./localStore";
+
 function readWorkspaceState(): WorkspaceState {
   try {
-    const raw = window.localStorage.getItem(workspaceStateKey);
+    const raw = getItem(workspaceStateKey);
     return raw ? JSON.parse(raw) as WorkspaceState : {};
   } catch {
     return {};
   }
 }
 
+function rememberRecentProject(current: string[] = [], projectPath: string) {
+  if (!projectPath) return current;
+  return [projectPath, ...current.filter((item) => item !== projectPath)].slice(0, 8);
+}
+
 function commandBlock(label: string, result: CommandResult) {
   const body = `${result.stdout || ""}${result.stderr || ""}`.trim() || "No output.";
   return `\r\n$ ${result.command || label}\r\n[${label} exit ${result.exitCode}]\r\n${body}\r\n`;
+}
+
+function patchFromDiffFiles(files: AgentDiffFile[] = []) {
+  return files
+    .map((file) => uiText(file.patch, "", 100000))
+    .filter((patch) => patch.trim())
+    .join("\n");
+}
+
+function diffFilesFromPatch(patch: string, fallbackPath = "workspace.diff"): AgentDiffFile[] {
+  const text = uiText(patch, "", 200000);
+  if (!text.trim()) return [];
+  const files: AgentDiffFile[] = [];
+  let current: { path: string; status: string; lines: string[] } | null = null;
+  const flush = () => {
+    if (!current) return;
+    const filePatch = current.lines.join("\n");
+    files.push({
+      file: current.path,
+      path: current.path,
+      patch: filePatch,
+      additions: filePatch.split(/\r?\n/).filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
+      deletions: filePatch.split(/\r?\n/).filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+      status: current.status
+    });
+  };
+  for (const line of text.split(/\r?\n/)) {
+    const header = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (header) {
+      flush();
+      current = { path: header[2], status: "modified", lines: [line] };
+      continue;
+    }
+    if (!current) current = { path: fallbackPath, status: "modified", lines: [] };
+    if (line.startsWith("new file mode")) current.status = "added";
+    if (line.startsWith("deleted file mode")) current.status = "deleted";
+    if (line.startsWith("+++ b/")) current.path = line.slice(6).trim() || current.path;
+    current.lines.push(line);
+  }
+  flush();
+  return files.length ? files : [{
+    file: fallbackPath,
+    path: fallbackPath,
+    patch: text,
+    additions: text.split(/\r?\n/).filter((line) => line.startsWith("+") && !line.startsWith("+++")).length,
+    deletions: text.split(/\r?\n/).filter((line) => line.startsWith("-") && !line.startsWith("---")).length,
+    status: "modified"
+  }];
+}
+
+function diffFilesFromUnknown(value: unknown, fallbackPath = "workspace.diff"): AgentDiffFile[] {
+  if (Array.isArray(value)) return value as AgentDiffFile[];
+  if (typeof value === "string") return diffFilesFromPatch(value, fallbackPath);
+  const record = asRecord(value);
+  if (!record) return [];
+  const patch = record.diff || record.patch || record.stdout || record.content || record.text;
+  return diffFilesFromPatch(uiText(patch, "", 200000), fallbackPath);
 }
 
 function flattenFiles(nodes: FileNode[]): FileNode[] {
@@ -289,13 +435,90 @@ const TOOL_PERMISSION_GROUPS = [
   { label: "Other", tools: ["todowrite", "webfetch", "websearch"] },
 ];
 
-function permissionRulesForMode(permissions: Record<string, string>): Array<{ action?: string; resource?: string; effect: string; description?: string }> {
-  return TOOL_PERMISSIONS.map((tool) => ({
-    action: tool.id,
-    resource: "*",
-    effect: permissions[tool.id] || "allow",
+function defaultGranularPermissions(): Record<string, PermissionEffect> {
+  const defaults: Record<string, PermissionEffect> = {};
+  TOOL_PERMISSIONS.forEach((tool) => {
+    defaults[tool.id] = "allow";
+  });
+  return defaults;
+}
+
+function createPermissionRule(input: Partial<EditablePermissionRule> = {}): EditablePermissionRule {
+  return {
+    id: input.id || `rule-${uid()}`,
+    permission: input.permission || "bash",
+    pattern: input.pattern || "*",
+    action: input.action || "ask",
+    description: input.description
+  };
+}
+
+function safePermissionEffect(value: unknown, fallback: PermissionEffect = "allow"): PermissionEffect {
+  const text = uiText(value, fallback).toLowerCase();
+  if (text.includes("deny")) return "deny";
+  if (text.includes("ask") || text.includes("prompt")) return "ask";
+  return "allow";
+}
+
+function normalizeEditablePermissionRules(value: unknown): EditablePermissionRule[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item, index) => {
+      const record = asRecord(item);
+      if (!record) return null;
+      const permission = uiText(record.permission || record.action || record.tool, "").trim();
+      if (!permission) return null;
+      return createPermissionRule({
+        id: uiText(record.id, `rule-${index}-${uid()}`),
+        permission,
+        pattern: uiText(record.pattern || record.resource || record.path, "*").trim() || "*",
+        action: safePermissionEffect(record.action || record.effect || record.mode || record.value, "ask"),
+        description: uiText(record.description, "")
+      });
+    })
+    .filter((rule): rule is EditablePermissionRule => Boolean(rule));
+}
+
+function safePermissionMap(value: unknown): Record<string, PermissionEffect> {
+  const defaults = defaultGranularPermissions();
+  const record = asRecord(value);
+  if (!record) return defaults;
+  for (const tool of TOOL_PERMISSIONS) {
+    defaults[tool.id] = safePermissionEffect(record[tool.id], defaults[tool.id]);
+  }
+  return defaults;
+}
+
+function safePermissionPreset(): EditablePermissionRule[] {
+  return [
+    createPermissionRule({ permission: "bash", pattern: "git *", action: "allow", description: "Let Code inspect git state." }),
+    createPermissionRule({ permission: "bash", pattern: "npm *", action: "ask", description: "Confirm package scripts first." }),
+    createPermissionRule({ permission: "bash", pattern: "rm *", action: "deny", description: "Block broad deletion commands." }),
+    createPermissionRule({ permission: "bash", pattern: "sudo *", action: "deny", description: "Block privilege escalation." }),
+    createPermissionRule({ permission: "edit", pattern: "*", action: "ask", description: "Ask before editing files." }),
+    createPermissionRule({ permission: "external_directory", pattern: "*", action: "ask", description: "Ask before leaving the workspace." })
+  ];
+}
+
+function permissionRulesForMode(
+  permissions: Record<string, string>,
+  customRules: EditablePermissionRule[] = []
+): PermissionRule[] {
+  const baseRules: PermissionRule[] = TOOL_PERMISSIONS.map((tool) => ({
+    permission: tool.id,
+    pattern: "*",
+    action: safePermissionEffect(permissions[tool.id], "allow"),
     description: tool.label,
   }));
+  const overrides = customRules
+    .filter((rule) => rule.permission.trim() && rule.pattern.trim())
+    .map((rule) => ({
+      permission: rule.permission.trim(),
+      pattern: rule.pattern.trim() || "*",
+      action: rule.action,
+      description: rule.description?.trim() || undefined
+    }));
+  return [...baseRules, ...overrides];
 }
 
 function engineSlashCommands(commands: AgentCommandInfo[]) {
@@ -333,23 +556,27 @@ function safeJsonPreview(value: unknown, fallback = "") {
   }
 }
 
-function uiText(value: unknown, fallback = ""): string {
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function uiText(value: unknown, fallback = "", maxLength = 4000): string {
   if (value === undefined || value === null) return fallback;
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value);
+  if (typeof value === "string") return value.slice(0, maxLength);
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value).slice(0, maxLength);
   if (Array.isArray(value)) {
     const text = value.map((item) => uiText(item)).filter(Boolean).join(", ");
-    return text || fallback;
+    return (text || fallback).slice(0, maxLength);
   }
   if (typeof value === "object") {
     const item = value as Record<string, unknown>;
     for (const key of ["title", "name", "tool", "type", "status", "message", "command", "path", "file", "text", "content"]) {
       const nested = item[key];
       if (typeof nested === "string" || typeof nested === "number" || typeof nested === "boolean" || typeof nested === "bigint") {
-        return String(nested);
+        return String(nested).slice(0, maxLength);
       }
     }
-    return safeJsonPreview(value, fallback).slice(0, 4000);
+    return safeJsonPreview(value, fallback).slice(0, maxLength);
   }
   return fallback;
 }
@@ -374,16 +601,47 @@ function summarizePartForUi(part: unknown): AgentToolPart | null {
   if (item.part && typeof item.part === "object") return summarizePartForUi(item.part);
   const type = String(item.type || "");
   if (["", "text", "reasoning", "patch", "step-start", "step-finish"].includes(type)) return null;
-  const input = item.input as Record<string, unknown> | undefined;
-  const title = uiText(item.tool || item.name || input?.filePath || input?.path || input?.command || input?.query || item.command || item.file || type, "Code step");
-  const detail = partText(part) || (typeof input?.content === "string" ? input.content : "") || safeJsonPreview(item.output || item.metadata || item.input || "");
+  const state = item.state && typeof item.state === "object" ? item.state as Record<string, unknown> : undefined;
+  const input = item.input && typeof item.input === "object"
+    ? item.input as Record<string, unknown>
+    : state?.input && typeof state.input === "object"
+      ? state.input as Record<string, unknown>
+      : undefined;
+  const output = item.output && typeof item.output === "object"
+    ? item.output as Record<string, unknown>
+    : state?.output && typeof state.output === "object"
+      ? state.output as Record<string, unknown>
+      : undefined;
+  const metadata = item.metadata && typeof item.metadata === "object"
+    ? item.metadata as Record<string, unknown>
+    : state?.metadata && typeof state.metadata === "object"
+      ? state.metadata as Record<string, unknown>
+      : undefined;
+  const time = item.time && typeof item.time === "object" ? item.time : state?.time;
+  const title = uiText(state?.title || item.tool || item.name || input?.filePath || input?.path || input?.command || input?.query || metadata?.filepath || metadata?.path || item.command || item.file || type, "Code step");
+  const status = uiText(state?.status || item.status || item.phase || item.finish || metadata?.status || output?.status);
+  const detail = partText(part)
+    || (typeof state?.output === "string" ? state.output : "")
+    || (typeof input?.content === "string" ? input.content : "")
+    || uiText(output?.stdout || output?.stderr || output?.text || output?.content || output?.result || metadata?.preview, "", 4000)
+    || safeJsonPreview(item.output || item.metadata || item.input || "");
   return {
     id: uiText(item.id, `${type}-${title}`),
     type: uiText(item.tool || item.name || type, "tool"),
     title,
-    status: uiText(item.status || item.state || ""),
+    status,
     detail: detail.slice(0, 4000),
-    raw: item
+    raw: {
+      ...item,
+      input: input || {},
+      output: output || state?.output,
+      metadata: metadata || {},
+      time,
+      state: state || {},
+      status,
+      title,
+      outputPath: item.outputPath || metadata?.outputPath || output?.outputPath
+    }
   };
 }
 
@@ -462,36 +720,67 @@ function compactActivityChips(chips: AgentActivityChip[]) {
 }
 
 function todosFromMessages(messages: AgentMessage[]): AgentTodoItem[] {
-  const explicit = messages.flatMap((message) => (message.tools || []).flatMap((tool) => {
-    const raw = tool.raw as Record<string, unknown> | undefined;
-    const todos = raw?.todos || raw?.items || raw?.todo;
-    if (!Array.isArray(todos)) return [];
-    return todos.map((todo, index) => {
-      const item = todo as Record<string, unknown>;
-      const status = String(item.status || item.state || "").toLowerCase();
+  return deriveTodosFromUiMessages(messages);
+}
+
+function valueCount(value: unknown): number {
+  if (!value) return 0;
+  if (Array.isArray(value)) return value.length;
+  if (typeof value === "object") return Object.keys(value as Record<string, unknown>).length;
+  return String(value).trim() ? 1 : 0;
+}
+
+function shortPreview(value: unknown, fallback = "No data") {
+  const text = uiText(value, fallback).replace(/\s+/g, " ").trim();
+  return (text || fallback).slice(0, 120);
+}
+
+function vcsChangeCount(status: unknown): number {
+  if (!status || typeof status !== "object") return 0;
+  const item = status as Record<string, unknown>;
+  if (Array.isArray(item.changes)) return item.changes.length;
+  if (Array.isArray(item.files)) return item.files.length;
+  if (Array.isArray(item.status)) return item.status.length;
+  return valueCount(status);
+}
+
+function gitChangesFromUnknown(status: unknown): Array<{ status: string; path: string }> {
+  const record = asRecord(status);
+  const candidates = record?.changes || record?.files || record?.status;
+  if (Array.isArray(candidates)) {
+    return candidates.map((entry, index) => {
+      if (typeof entry === "string") {
+        const match = entry.match(/^\s*([MADRCU?!]{1,2})\s+(.+)$/);
+        return { status: match?.[1]?.trim() || "M", path: (match?.[2] || entry).trim() };
+      }
+      const item = asRecord(entry) || {};
       return {
-        id: String(item.id || `${tool.id}-${index}`),
-        text: String(item.content || item.text || item.title || "Task"),
-        status: status.includes("done") || status.includes("complete") ? "done" : status.includes("progress") ? "in_progress" : "pending"
-      } satisfies AgentTodoItem;
-    });
-  }));
-  if (explicit.length) return explicit.slice(-8);
-  const latestPlan = [...messages].reverse().find((message) => /(^|\n)\s*(-|\d+\.)\s+\[?[ x]?\]?/i.test(message.text));
-  if (!latestPlan) return [];
-  return latestPlan.text
-    .split(/\r?\n/)
-    .map((line, index) => {
-      const match = line.match(/^\s*(?:-|\d+\.)\s+(?:\[( |x|-)\]\s*)?(.+)/i);
-      if (!match) return null;
-      return {
-        id: `${latestPlan.id}-todo-${index}`,
-        text: match[2].trim().slice(0, 120),
-        status: match[1]?.toLowerCase() === "x" ? "done" : match[1] === "-" ? "in_progress" : "pending"
-      } satisfies AgentTodoItem;
-    })
-    .filter((item): item is AgentTodoItem => Boolean(item))
-    .slice(0, 8);
+        status: uiText(item.status || item.state || item.type || item.change, "M"),
+        path: uiText(item.path || item.file || item.name, `change-${index + 1}`)
+      };
+    }).filter((change) => change.path);
+  }
+  if (typeof status === "string") {
+    return status.split(/\r?\n/).map((line) => {
+      const match = line.match(/^\s*([MADRCU?!]{1,2})\s+(.+)$/);
+      return match ? { status: match[1].trim(), path: match[2].trim() } : null;
+    }).filter((change): change is { status: string; path: string } => Boolean(change));
+  }
+  return [];
+}
+
+function gitStateFromVcsResult(result: unknown): GitState | null {
+  const envelope = asRecord(result);
+  const status = envelope?.status !== undefined ? envelope.status : result;
+  const record = asRecord(status);
+  const changes = gitChangesFromUnknown(status);
+  if (!record && !changes.length && typeof status !== "string") return null;
+  return {
+    ok: envelope?.ok !== false && record?.ok !== false,
+    branch: uiText(record?.branch || record?.current || record?.head || record?.ref, "main"),
+    changes,
+    message: uiText(record?.message || envelope?.fallback || envelope?.error || record?.error, changes.length ? `${changes.length} change${changes.length === 1 ? "" : "s"}` : "Working tree clean")
+  };
 }
 
 function agentMessagesFromOpenCode(messages: unknown[], sessionID: string): AgentMessage[] {
@@ -513,6 +802,113 @@ function agentMessagesFromOpenCode(messages: unknown[], sessionID: string): Agen
   }).filter((message) => message.text || message.tools?.length);
 }
 
+function numericContextValue(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Number(value);
+  }
+  return undefined;
+}
+
+function sessionSummaryText(context: unknown, detail: unknown, fallbackMessages: AgentMessage[]) {
+  const contextRecord = asRecord(context);
+  const detailRecord = asRecord(detail);
+  const summary = uiText(
+    contextRecord?.summary || contextRecord?.text || contextRecord?.message || detailRecord?.summary,
+    ""
+  ).trim();
+  if (summary) return summary.slice(0, 420);
+  const lastAssistant = [...fallbackMessages].reverse().find((message) => message.role === "assistant" && message.text.trim());
+  if (lastAssistant) return lastAssistant.text.replace(/\s+/g, " ").slice(0, 260);
+  return "No compact engine summary is available yet. Recent messages and artifacts are still counted below.";
+}
+
+function summarizeSessionContext(
+  sessionID: string,
+  detail: unknown,
+  context: unknown,
+  rawMessages: unknown[],
+  diff: AgentDiffFile[],
+  permissions: AgentPermissionRequest[],
+  todos: AgentTodoItem[]
+): AgentSessionContextSummary {
+  const detailRecord = asRecord(detail);
+  const contextRecord = asRecord(context);
+  const usageRecord = asRecord(contextRecord?.usage || contextRecord?.tokens || contextRecord?.context);
+  const detailMessages = Array.isArray(detailRecord?.messages) ? detailRecord.messages : [];
+  const messages = rawMessages.length ? rawMessages : detailMessages;
+  const uiMessages = agentMessagesFromOpenCode(messages, sessionID);
+  const fallbackTitle = uiText(detailRecord?.title || contextRecord?.title, sessionID);
+  const updated = asRecord(detailRecord?.time)?.updated || asRecord(contextRecord?.time)?.updated || detailRecord?.updated || contextRecord?.updated;
+  const updatedLabel = typeof updated === "number"
+    ? sessionTimeLabel({ id: sessionID, time: { updated } })
+    : uiText(updated, "live");
+  return {
+    sessionID,
+    title: fallbackTitle,
+    summaryText: sessionSummaryText(context, detail, uiMessages),
+    messageCount: uiMessages.length || messages.length,
+    toolCount: uiMessages.reduce((sum, message) => sum + (message.tools?.length || 0), 0),
+    diffCount: diff.length,
+    permissionCount: permissions.length,
+    todoCount: todos.length,
+    tokenCount: numericContextValue(contextRecord?.tokens, usageRecord?.tokens, usageRecord?.input, usageRecord?.total),
+    contextLimit: numericContextValue(contextRecord?.limit, contextRecord?.contextLimit, usageRecord?.limit, usageRecord?.context),
+    updatedLabel,
+    recent: uiMessages
+      .filter((message) => message.text.trim())
+      .slice(-4)
+      .map((message) => ({
+        role: message.role,
+        text: message.text.replace(/\s+/g, " ").slice(0, 180)
+      }))
+  };
+}
+
+function emptyMcpSnapshot(): AgentMcpSnapshot {
+  return { serverCount: 0, activeServerCount: 0, integrationCount: 0, servers: [], integrations: [] };
+}
+
+function summarizeMcpSnapshot(config: { servers?: Record<string, unknown> } | undefined, integrations: unknown[] = []): AgentMcpSnapshot {
+  const servers = Object.entries(config?.servers || {}).map(([name, value]) => {
+    const server = asRecord(value) || {};
+    return {
+      name,
+      type: uiText(server.type || (server.command ? "stdio" : server.url ? "sse" : "server"), "server"),
+      disabled: Boolean(server.disabled)
+    };
+  });
+  const integrationRows = integrations.map((integration, index) => {
+    const item = asRecord(integration) || {};
+    const id = uiText(item.id, `integration-${index + 1}`);
+    return {
+      id,
+      name: uiText(item.name || item.label || item.title, id),
+      connected: Boolean(item.connected)
+    };
+  });
+  return {
+    serverCount: servers.length,
+    activeServerCount: servers.filter((server) => !server.disabled).length,
+    integrationCount: integrationRows.length,
+    servers,
+    integrations: integrationRows
+  };
+}
+
+function commandResultFromUnknown(label: string, value: unknown): CommandResult {
+  if (typeof value === "string") {
+    return { exitCode: 0, stdout: value, stderr: "", command: label };
+  }
+  const item = asRecord(value) || {};
+  return {
+    exitCode: typeof item.exitCode === "number" ? item.exitCode : item.ok === false ? 1 : 0,
+    stdout: uiText(item.stdout || item.output, ""),
+    stderr: uiText(item.stderr || item.error, ""),
+    command: uiText(item.command, label)
+  };
+}
+
 export function App() {
   const { showToast: toast } = useToast();
   const initialStateRef = useRef(readWorkspaceState());
@@ -520,6 +916,7 @@ export function App() {
   const pendingRevealRef = useRef<{ path: string; line: number; column?: number } | null>(null);
 
   const [projectPath, setProjectPath] = useState("");
+  const [recentProjects, setRecentProjects] = useState<string[]>(initialStateRef.current.recentProjects || []);
   const [files, setFiles] = useState<FileNode[]>([]);
   const [tabs, setTabs] = useState<OpenTab[]>([]);
   const [activePath, setActivePath] = useState("");
@@ -532,6 +929,7 @@ export function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(initialStateRef.current.sidebarOpen ?? true);
   const [isBottomOpen, setIsBottomOpen] = useState(initialStateRef.current.bottomOpen ?? true);
   const [isAgentOpen, setIsAgentOpen] = useState(initialStateRef.current.agentOpen ?? false);
+  const [isAgentExpanded, setIsAgentExpanded] = useState(false);
   const [activeActivity, setActiveActivity] = useState<ActivityView>(initialStateRef.current.activeActivity || "explorer");
   const [bottomPanel, setBottomPanel] = useState<BottomPanel>(initialStateRef.current.bottomPanel || "terminal");
   const [overlayMode, setOverlayMode] = useState<OverlayMode>(null);
@@ -546,15 +944,26 @@ export function App() {
   const [serverLocation, setServerLocation] = useState<{ url?: string; port?: number; [key: string]: unknown } | null>(null);
   const [lastHealthCheck, setLastHealthCheck] = useState<string>("");
   const [agentPrompt, setAgentPrompt] = useState(starterPrompt);
-  const [agentBusy, setAgentBusy] = useState(false);
-  const [activeAgentSessionId, setActiveAgentSessionId] = useState("");
-  const [activeAgentMessageId, setActiveAgentMessageId] = useState("");
-  const [agentPermissionMode, setAgentPermissionMode] = useState("Full access");
-  const [granularPermissions, setGranularPermissions] = useState<Record<string, "allow" | "ask" | "deny">>(() => {
-    const defaults: Record<string, "allow" | "ask" | "deny"> = {};
-    TOOL_PERMISSIONS.forEach(t => defaults[t.id] = "allow");
-    return defaults;
-  });
+  const [agentRuntime, dispatchAgentRuntime] = useReducer(
+    agentRuntimeReducer,
+    undefined,
+    () => createInitialAgentRuntimeState()
+  );
+  const agentBusy = agentRuntime.busy;
+  const activeAgentSessionId = agentRuntime.activeSessionID;
+  const activeAgentMessageId = agentRuntime.activeMessageID;
+  const agentMessages = agentRuntime.messages;
+  const agentActivityChips = agentRuntime.activityChips;
+  const agentRuntimeTodos = agentRuntime.todos.length
+    ? agentRuntime.todos
+    : deriveTodosFromUiMessages(agentRuntime.messages);
+  const [agentPermissionMode, setAgentPermissionMode] = useState(initialStateRef.current.agentPermissionMode || "Full access");
+  const [granularPermissions, setGranularPermissions] = useState<Record<string, PermissionEffect>>(() =>
+    safePermissionMap(initialStateRef.current.granularPermissions)
+  );
+  const [customPermissionRules, setCustomPermissionRules] = useState<EditablePermissionRule[]>(() =>
+    normalizeEditablePermissionRules(initialStateRef.current.customPermissionRules)
+  );
   const [savedPermissions, setSavedPermissions] = useState<SavedPermission[]>([]);
   const [agentPlanMode, setAgentPlanMode] = useState(false);
   const [agentContextMode, setAgentContextMode] = useState<AgentContextMode>("workspace");
@@ -565,15 +974,6 @@ export function App() {
   const [v2Models, setV2Models] = useState<Array<{ id: string; providerID: string; name: string }>>([]);
   const [agentList, setAgentList] = useState<Array<{ name: string; mode?: string; description?: string }>>([]);
   const [selectedAgent, setSelectedAgent] = useState("build");
-  const [agentActivityChips, setAgentActivityChips] = useState<AgentActivityChip[]>([]);
-  const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([
-    {
-      id: "welcome",
-      role: "system",
-      text: "Ask Code to review, explain, edit-plan, or reason about this workspace. The GUI runs the engine behind the scenes without opening the terminal UI.",
-      meta: "Code Workbench"
-    }
-  ]);
   const [pendingQuestions, setPendingQuestions] = useState<AgentQuestion[]>([]);
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [references, setReferences] = useState<ReferenceInfo[]>([]);
@@ -601,8 +1001,12 @@ export function App() {
   const [mcpEditorOpen, setMcpEditorOpen] = useState(false);
   const [mcpConfig, setMcpConfig] = useState<{ servers: Record<string, any> }>({ servers: {} });
   const [mcpDirty, setMcpDirty] = useState(false);
+  const [mcpSnapshot, setMcpSnapshot] = useState<AgentMcpSnapshot>(emptyMcpSnapshot());
+  const [diagnosticsSnapshot, setDiagnosticsSnapshot] = useState<DiagnosticsSnapshot>({ loading: false });
   // Project copy state
   const [copyProjectBusy, setCopyProjectBusy] = useState(false);
+  const [sessionContext, setSessionContext] = useState<AgentSessionContextSummary | null>(null);
+  const [sessionContextBusy, setSessionContextBusy] = useState(false);
 
   const activeTab = tabs.find((tab) => tab.path === activePath) || null;
   const dirtyCount = tabs.filter((tab) => tab.content !== tab.savedContent).length;
@@ -622,6 +1026,16 @@ export function App() {
       });
   }, [agentCommands]);
   const effectiveModel = selectedModel;
+  const gitActionAvailability = useMemo<GitActionAvailability>(() => {
+    const gitBridge = api.git as OptionalGitBridge;
+    const codeBridge = api.opencode as OptionalOpenCodeBridge;
+    return {
+      diff: Boolean(codeBridge.vcsDiff || codeBridge.diff || gitBridge.diff),
+      stage: Boolean(codeBridge.vcsStage || gitBridge.stage),
+      unstage: Boolean(codeBridge.vcsUnstage || gitBridge.unstage),
+      applyPatch: Boolean(codeBridge.vcsApply || codeBridge.vcsPatch)
+    };
+  }, []);
 
   const refreshFiles = useCallback(async (workspace = projectPath) => {
     if (!workspace) return;
@@ -630,6 +1044,19 @@ export function App() {
 
   const refreshGit = useCallback(async (workspace = projectPath) => {
     if (!workspace) return;
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (bridge.vcsStatus) {
+      try {
+        const vcsResult = await bridge.vcsStatus({ projectPath: workspace });
+        const parsed = gitStateFromVcsResult(vcsResult);
+        if (parsed) {
+          setGitState(parsed);
+          return;
+        }
+      } catch {
+        // Fall back to the local git bridge below.
+      }
+    }
     setGitState((await withApiError(api.git.status(workspace), toast)) ?? { ok: false, branch: "unknown", changes: [], message: "Unable to read Git status" });
   }, [projectPath, toast]);
 
@@ -676,11 +1103,128 @@ export function App() {
     }
   }, [projectPath, toast]);
 
-  const loadSavedPermissions = useCallback(async () => {
+  const refreshMcpSnapshot = useCallback(async (workspace = projectPath) => {
+    if (!workspace) {
+      setMcpSnapshot(emptyMcpSnapshot());
+      return;
+    }
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    try {
+      const [configResult, integrationsResult] = await Promise.all([
+        bridge.readMCPConfig ? bridge.readMCPConfig({ projectPath: workspace }) : Promise.resolve({ ok: false, mcpConfig: { servers: {} } }),
+        bridge.mcpIntegrations ? bridge.mcpIntegrations({ projectPath: workspace }) : Promise.resolve({ ok: true, integrations: [] })
+      ]);
+      const nextConfig = configResult.ok ? configResult.mcpConfig || { servers: {} } : { servers: {} };
+      setMcpConfig(nextConfig);
+      setMcpDirty(false);
+      setMcpSnapshot(summarizeMcpSnapshot(nextConfig, integrationsResult.ok ? integrationsResult.integrations : []));
+    } catch {
+      setMcpSnapshot(emptyMcpSnapshot());
+    }
+  }, [projectPath]);
+
+  const changeMcpConnection = useCallback(async (name: string, connect: boolean) => {
+    if (!projectPath || !name) return;
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    const fn = connect ? bridge.mcpConnect : bridge.mcpDisconnect;
+    if (!fn) {
+      toast("MCP connection control is not available in this build.", "info");
+      return;
+    }
+    try {
+      const result = await fn({ projectPath, name });
+      if (result.ok) {
+        toast(`${name} ${connect ? "connected" : "disconnected"}.`, "success");
+      } else {
+        toast(result.error || `${name} ${connect ? "connect" : "disconnect"} failed.`, "error");
+      }
+      setAgentLog((log) => [
+        `MCP ${name}: ${connect ? "connect" : "disconnect"} ${result.ok ? "succeeded" : "failed"}.`,
+        ...log
+      ].slice(0, 30));
+      await refreshMcpSnapshot(projectPath);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [projectPath, refreshMcpSnapshot, toast]);
+
+  const refreshDiagnostics = useCallback(async (workspace = projectPath) => {
+    if (!workspace) {
+      setDiagnosticsSnapshot({ loading: false, error: "No workspace open." });
+      return;
+    }
+    setDiagnosticsSnapshot((current) => ({ ...current, loading: true, error: undefined }));
+    try {
+      const [formatter, lsp] = await Promise.all([
+        api.opencode.formatterStatus({ projectPath: workspace }),
+        api.opencode.lspStatus({ projectPath: workspace })
+      ]);
+      const updatedAt = new Date().toLocaleTimeString();
+      setDiagnosticsSnapshot({ loading: false, updatedAt, formatter, lsp });
+      setOutputLog((log) => [
+        `Diagnostics refreshed at ${updatedAt}`,
+        `Formatter: ${formatter.ok === false ? formatter.error || "unavailable" : "available"}`,
+        `LSP: ${lsp.ok === false ? lsp.error || "unavailable" : "available"}`,
+        ...log
+      ].slice(0, 30));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setDiagnosticsSnapshot({ loading: false, error: message });
+      setOutputLog((log) => [`Diagnostics refresh failed: ${message}`, ...log].slice(0, 30));
+    }
+  }, [projectPath]);
+
+  const refreshSessionContext = useCallback(async (sessionID = activeAgentSessionId) => {
+    if (!projectPath || !sessionID) {
+      setSessionContext(null);
+      return;
+    }
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    setSessionContextBusy(true);
+    try {
+      const [contextResult, detail, messages, diff, permissions, todos] = await Promise.all([
+        bridge.sessionContext ? withApiError(bridge.sessionContext({ projectPath, sessionID }), toast) : Promise.resolve(null),
+        bridge.getSession ? withApiError(bridge.getSession({ projectPath, sessionID }), toast) : bridge.session ? withApiError(bridge.session({ projectPath, sessionID }), toast) : Promise.resolve(null),
+        bridge.messages ? withApiError(bridge.messages({ projectPath, sessionID }), toast) : Promise.resolve([]),
+        bridge.diff ? withApiError(bridge.diff({ projectPath, sessionID }), toast) : Promise.resolve([]),
+        bridge.permissions ? withApiError(bridge.permissions({ projectPath, sessionID }), toast) : Promise.resolve([]),
+        bridge.todo ? withApiError(bridge.todo({ projectPath, sessionID }), toast) : Promise.resolve([])
+      ]);
+      const contextRecord = asRecord(contextResult);
+      const contextPayload = contextRecord && "context" in contextRecord ? contextRecord.context : contextResult;
+      setSessionContext(summarizeSessionContext(
+        sessionID,
+        detail,
+        contextPayload,
+        Array.isArray(messages) ? messages : [],
+        Array.isArray(diff) ? diff : [],
+        Array.isArray(permissions) ? permissions : [],
+        Array.isArray(todos) ? todos : []
+      ));
+    } catch (error) {
+      setSessionContext({
+        sessionID,
+        title: sessionID,
+        summaryText: "Session context is not available from this bridge yet.",
+        messageCount: agentMessages.filter((message) => message.sessionID === sessionID || !message.sessionID).length,
+        toolCount: agentMessages.reduce((sum, message) => sum + (message.tools?.length || 0), 0),
+        diffCount: agentMessages.reduce((sum, message) => sum + (message.diff?.length || 0), 0),
+        permissionCount: agentMessages.reduce((sum, message) => sum + (message.permissions?.length || 0), 0),
+        todoCount: agentRuntimeTodos.length,
+        updatedLabel: "local",
+        recent: agentMessages.slice(-4).map((message) => ({ role: message.role, text: message.text.replace(/\s+/g, " ").slice(0, 180) })),
+        unavailable: error instanceof Error ? error.message : String(error)
+      });
+    } finally {
+      setSessionContextBusy(false);
+    }
+  }, [activeAgentSessionId, agentMessages, agentRuntimeTodos.length, projectPath, toast]);
+
+  const loadSavedPermissions = useCallback(async (workspace = projectPath) => {
     try {
       const bridge = api.opencode as OptionalOpenCodeBridge;
       if (bridge.savedPermissions) {
-        const list = await bridge.savedPermissions({ projectPath });
+        const list = await bridge.savedPermissions({ projectPath: workspace });
         if (Array.isArray(list)) {
           setSavedPermissions(list);
         }
@@ -716,7 +1260,13 @@ export function App() {
     if (modelsArr.length > 0 && typeof modelsArr[0] === "object") {
       setV2Models(modelsArr);
     }
-    const agentsArr = Array.isArray(agentsResult) ? agentsResult : [];
+    const agentsArr = (Array.isArray(agentsResult) ? agentsResult : [])
+      .map((agent, index) => ({
+        name: uiText(agent.name, index === 0 ? "build" : `agent-${index + 1}`),
+        mode: typeof agent.mode === "string" ? agent.mode : undefined,
+        description: typeof agent.description === "string" ? agent.description : undefined
+      }))
+      .filter((agent) => agent.name);
     if (agentsArr.length > 0) {
       setAgentList(agentsArr);
       setSelectedAgent(function(current) {
@@ -732,49 +1282,44 @@ export function App() {
     if (!projectPath || !sessionID) return;
     const bridge = api.opencode as OptionalOpenCodeBridge;
     const messages = (await withApiError(bridge.messages({ projectPath, sessionID }), toast)) ?? [];
-    const uiMessages = agentMessagesFromOpenCode(messages, sessionID);
     const diff = (await withApiError(bridge.diff({ projectPath, sessionID }), toast)) ?? [];
-    setActiveAgentSessionId(sessionID);
-    setAgentActivityChips((chips) => [
-      { id: `open-${sessionID}-${Date.now()}`, label: "session resumed", tone: "success" as const, sessionID },
-      ...chips
-    ].slice(0, 10));
-    setAgentMessages(uiMessages.length ? uiMessages : [{
-      id: `session-${sessionID}`,
-      role: "system",
-      text: "This session has no visible messages yet.",
-      meta: sessionID,
-      sessionID
-    }]);
-    if (diff.length) {
-      setAgentMessages((current) => current.map((message, index) => index === current.length - 1 ? { ...message, diff } : message));
-    }
+    dispatchAgentRuntime({ type: "sessionResumed", sessionID, messages, diff });
+    await refreshSessionContext(sessionID);
     setIsAgentOpen(true);
     setActiveActivity("ai");
-  }, [projectPath, toast]);
+  }, [projectPath, refreshSessionContext, toast]);
 
   const startNewAgentSession = useCallback(async () => {
     if (!projectPath) return;
     const bridge = api.opencode as OptionalOpenCodeBridge;
+    let nextSessionID = "";
     if (bridge.startSession) {
       const session = await bridge.startSession({ projectPath, model: effectiveModel, agent: selectedAgent });
       const sessionID = session.sessionID || session.id || "";
       if (sessionID) {
-        setActiveAgentSessionId(sessionID);
-        setAgentActivityChips((chips) => [{ id: `new-${sessionID}`, label: "new session", tone: "success" as const, sessionID }, ...chips].slice(0, 10));
+        nextSessionID = sessionID;
+        dispatchAgentRuntime({ type: "sessionStarted", sessionID, model: effectiveModel, title: "new session" });
+        await refreshSessionContext(sessionID);
       }
     } else {
-      setActiveAgentSessionId("");
+      dispatchAgentRuntime({ type: "reset", state: { activeSessionID: "" } });
     }
-    setAgentMessages([{
-      id: `new-session-${uid()}`,
-      role: "system",
-      text: "Started a fresh Code thread. Your next prompt will create or attach to a backend session.",
-      meta: effectiveModel || "Code engine"
-    }]);
+    dispatchAgentRuntime({
+      type: "reset",
+      state: {
+        activeSessionID: nextSessionID,
+        model: effectiveModel,
+        messages: [{
+          id: `new-session-${uid()}`,
+          role: "system",
+          text: "Started a fresh Code thread. Your next prompt will create or attach to a backend session.",
+          meta: effectiveModel || "Code engine"
+        }]
+      }
+    });
     setIsAgentOpen(true);
     setActiveActivity("ai");
-  }, [effectiveModel, projectPath, selectedAgent]);
+  }, [effectiveModel, projectPath, refreshSessionContext, selectedAgent]);
 
   const forkAgentSession = useCallback(async (sessionID = activeAgentSessionId, messageID = activeAgentMessageId) => {
     if (!projectPath || !sessionID) return;
@@ -784,12 +1329,12 @@ export function App() {
       const nextID = String(forked?.sessionID || forked?.id || "");
       if (nextID) {
         await openAgentSession(nextID);
-        setAgentActivityChips((chips) => [{ id: `fork-${nextID}`, label: "session forked", tone: "success" as const, sessionID: nextID }, ...chips].slice(0, 10));
+        dispatchAgentRuntime({ type: "activity", chip: { id: `fork-${nextID}`, label: "session forked", tone: "success", sessionID: nextID } });
         return;
       }
     }
     setAgentPrompt((prompt) => prompt || `/fork ${sessionID}${messageID ? ` ${messageID}` : ""}`);
-    setAgentActivityChips((chips) => [{ id: `fork-staged-${Date.now()}`, label: "fork staged", tone: "warn" as const, sessionID }, ...chips].slice(0, 10));
+    dispatchAgentRuntime({ type: "activity", chip: { id: `fork-staged-${Date.now()}`, label: "fork staged", tone: "warn", sessionID } });
   }, [activeAgentMessageId, activeAgentSessionId, openAgentSession, projectPath]);
 
   const openFile = useCallback(async (path: string, options: { pinned?: boolean; preview?: boolean; line?: number; column?: number } = {}) => {
@@ -828,6 +1373,7 @@ export function App() {
     ]);
     const nextProject = saved.projectPath || defaultProject;
     setProjectPath(nextProject);
+    setRecentProjects((current) => rememberRecentProject(current, nextProject));
     setOllamaOnline(status.online);
     setOpencodeVersion(info.installed ? info.version : "not installed");
     // Fetch initial server health
@@ -850,7 +1396,8 @@ export function App() {
     await refreshAgentCapabilities(nextProject);
     await refreshSkills(nextProject);
     await refreshReferences(nextProject);
-    await loadSavedPermissions();
+    await refreshMcpSnapshot(nextProject);
+    await loadSavedPermissions(nextProject);
     if (status.online) {
       const models = await api.ollama.models();
       setOllamaModels(models);
@@ -871,11 +1418,19 @@ export function App() {
     const validTabs: OpenTab[] = restoredTabs.filter((tab): tab is NonNullable<typeof tab> => Boolean(tab));
     setTabs(validTabs);
     setActivePath(saved.activePath && validTabs.some((tab) => tab.path === saved.activePath) ? saved.activePath : validTabs[0]?.path || "");
-  }, [refreshAgentCapabilities, refreshAgentSessions, refreshGit, refreshSkills, refreshReferences, loadSavedPermissions]);
+  }, [refreshAgentCapabilities, refreshAgentSessions, refreshGit, refreshSkills, refreshReferences, refreshMcpSnapshot, loadSavedPermissions]);
 
   useEffect(() => {
     boot().catch((error) => setAgentLog((log) => [`Startup failed: ${String(error)}`, ...log]));
   }, [boot]);
+
+  useEffect(() => {
+    if (!projectPath || !activeAgentSessionId) {
+      setSessionContext(null);
+      return;
+    }
+    refreshSessionContext(activeAgentSessionId).catch(() => undefined);
+  }, [activeAgentSessionId, projectPath]);
 
   useEffect(() => {
     const bridge = api.opencode as OptionalOpenCodeBridge;
@@ -883,24 +1438,24 @@ export function App() {
     let disposed = false;
     const disposeEvent = bridge.onEvent((event: AgentRuntimeEvent | unknown) => {
       if (disposed || !event) return;
-      if (shouldShowRuntimeActivity(event)) {
-        const chip = activityChipFromEvent(event);
-        setAgentActivityChips((chips) => [chip, ...chips.filter((item) => item.id !== chip.id)].slice(0, 10));
+      dispatchAgentRuntime({ type: "runtimeEvent", event });
+      const runtimeEvent = asRecord(event);
+      if (!runtimeEvent) return;
+      const eventType = uiText(runtimeEvent.type || runtimeEvent.event);
+      if (eventType === "session") {
+        setAgentLog((log) => [
+          `Session ${uiText(runtimeEvent.sessionID, "unknown")} using ${uiText(runtimeEvent.model, "selected model")}.`,
+          ...log
+        ].slice(0, 30));
       }
-      const runtimeEvent = event as AgentRuntimeEvent;
-      if (!runtimeEvent.requestId) return;
-      if (runtimeEvent.type === "session") {
-        setActiveAgentSessionId(runtimeEvent.sessionID);
-        setAgentLog((log) => [`Session ${runtimeEvent.sessionID} using ${runtimeEvent.model || "selected model"}.`, ...log].slice(0, 30));
-      }
-      if (runtimeEvent.type === "files") {
+      if (eventType === "files") {
         refreshFiles(projectPath);
         refreshGit(projectPath);
         refreshOpenTabsFromDisk(projectPath);
         return;
       }
       // Q&A events
-      if (runtimeEvent.type === "question.asked") {
+      if (eventType === "question.asked") {
         const bridge = api.opencode as OptionalOpenCodeBridge;
         if (bridge.questionRequests) {
           bridge.questionRequests({ projectPath }).then((questions: AgentQuestion[]) => {
@@ -915,10 +1470,12 @@ export function App() {
         }
         return;
       }
-      if (runtimeEvent.type === "question.replied") {
+      if (eventType === "question.replied") {
+        const questionID = uiText(runtimeEvent.questionID);
+        const requestID = uiText(runtimeEvent.requestID);
         setPendingQuestions((current) =>
           current.map((q) =>
-            q.id === (runtimeEvent as any).questionID || q.requestID === (runtimeEvent as any).requestID
+            q.id === questionID || q.requestID === requestID
               ? { ...q, status: "replied" }
               : q
           )
@@ -926,50 +1483,20 @@ export function App() {
         return;
       }
       // Permission saved events
-      if (runtimeEvent.type === "permission.saved") {
+      if (eventType === "permission.saved") {
         loadSavedPermissions();
         return;
       }
       // Skills events
-      if (runtimeEvent.type === "skill.registered") {
+      if (eventType === "skill.registered") {
         refreshSkills(projectPath);
         return;
       }
       // References events
-      if (runtimeEvent.type === "reference.updated") {
+      if (eventType === "reference.updated") {
         refreshReferences(projectPath);
         return;
       }
-      setAgentMessages((messages) => messages.map((message) => {
-        if (message.requestId !== runtimeEvent.requestId) return message;
-        if (runtimeEvent.type === "status") {
-          return { ...message, status: runtimeEvent.status, pending: runtimeEvent.status !== "done" };
-        }
-        if (runtimeEvent.type === "session") {
-          return { ...message, sessionID: runtimeEvent.sessionID, meta: runtimeEvent.model || message.meta };
-        }
-        if (runtimeEvent.type === "text") {
-          const nextText = runtimeEvent.text || "";
-          const currentText = message.text || "";
-          return {
-            ...message,
-            text: nextText.length >= currentText.length ? nextText : currentText,
-            sessionID: runtimeEvent.sessionID || message.sessionID,
-            pending: true
-          };
-        }
-        if (runtimeEvent.type === "tools") {
-          return { ...message, tools: runtimeEvent.tools, sessionID: runtimeEvent.sessionID || message.sessionID };
-        }
-        if (runtimeEvent.type === "permissions") {
-          return { ...message, permissions: runtimeEvent.permissions, sessionID: runtimeEvent.sessionID || message.sessionID, status: "needs permission" };
-        }
-        if (runtimeEvent.type === "diff") {
-          setActiveAgentMessageId(runtimeEvent.messageID || "");
-          return { ...message, diff: runtimeEvent.diff, sessionID: runtimeEvent.sessionID || message.sessionID, messageID: runtimeEvent.messageID };
-        }
-        return message;
-      }));
     });
     return () => {
       disposed = true;
@@ -993,10 +1520,15 @@ export function App() {
       agentOpen: isAgentOpen,
       minimap,
       selectedModel,
-      cursorPositions
+      agentPermissionMode,
+      granularPermissions,
+      customPermissionRules,
+      cursorPositions,
+      recentProjects
     };
-    window.localStorage.setItem(workspaceStateKey, JSON.stringify(state));
-  }, [activeActivity, activePath, agentWidth, bottomHeight, bottomPanel, cursorPositions, isAgentOpen, isBottomOpen, isSidebarOpen, minimap, projectPath, selectedModel, sidebarWidth, tabs]);
+    setItem(workspaceStateKey, JSON.stringify(state));
+    // Previously: window.localStorage.setItem(workspaceStateKey, JSON.stringify(state));
+  }, [activeActivity, activePath, agentPermissionMode, agentWidth, bottomHeight, bottomPanel, cursorPositions, customPermissionRules, granularPermissions, isAgentOpen, isBottomOpen, isSidebarOpen, minimap, projectPath, recentProjects, selectedModel, sidebarWidth, tabs]);
 
   // Periodic health polling
   useEffect(() => {
@@ -1084,10 +1616,10 @@ export function App() {
     setTabs((current) => current.map((tab) => tab.path === activePath ? { ...tab, content: content || "", preview: false, pinned: true } : tab));
   };
 
-  const openProject = async () => {
-    const nextProject = await api.project.open();
+  const openWorkspacePath = useCallback(async (nextProject: string) => {
     if (!nextProject) return;
     setProjectPath(nextProject);
+    setRecentProjects((current) => rememberRecentProject(current, nextProject));
     setFiles(await api.files.list(nextProject));
     setTabs([]);
     setActivePath("");
@@ -1099,7 +1631,14 @@ export function App() {
     await refreshAgentCapabilities(nextProject);
     await refreshSkills(nextProject);
     await refreshReferences(nextProject);
-    await loadSavedPermissions();
+    await refreshMcpSnapshot(nextProject);
+    await loadSavedPermissions(nextProject);
+  }, [loadSavedPermissions, refreshAgentCapabilities, refreshAgentSessions, refreshGit, refreshMcpSnapshot, refreshReferences, refreshSkills]);
+
+  const openProject = async () => {
+    const nextProject = await api.project.open();
+    if (!nextProject) return;
+    await openWorkspacePath(nextProject);
   };
 
   const runSearch = useCallback(async () => {
@@ -1194,26 +1733,20 @@ export function App() {
     setActiveActivity("ai");
     setAgentPrompt("");
     const requestId = uid();
+    const userId = uid();
     const assistantId = uid();
     const permissionMode = options.permissionMode || agentPermissionMode;
     const planMode = options.planMode ?? agentPlanMode;
-    const userMessage: AgentMessage = {
-      id: uid(),
-      role: "user",
-      text: promptText,
-      meta: activePath || projectName(projectPath)
-    };
-    const assistantMessage: AgentMessage = {
-      id: assistantId,
+    dispatchAgentRuntime({
+      type: "promptSubmitted",
       requestId,
-      role: "assistant",
-      text: "",
-      meta: effectiveModel || "Code engine",
-      pending: true,
-      status: "queued"
-    };
-    setAgentMessages((messages) => [...messages, userMessage, assistantMessage]);
-    setAgentBusy(true);
+      userId,
+      assistantId,
+      prompt: promptText,
+      meta: activePath || projectName(projectPath),
+      model: effectiveModel || "Code engine",
+      sessionID: activeAgentSessionId
+    });
     try {
       const bridge = api.opencode as OptionalOpenCodeBridge;
       const fullPrompt = contextPrompt(
@@ -1223,14 +1756,24 @@ export function App() {
         selectedCode,
         tabs.map((tab) => tab.path),
         gitState.changes,
-        terminalOutput
+        terminalOutput,
+        {
+          projectPath,
+          sessionID: activeAgentSessionId,
+          sessionContext,
+          skills,
+          references,
+          diagnostics: diagnosticsSnapshot
+        }
       );
       if (bridge.prompt) {
         let sessionID = activeAgentSessionId;
         if (!sessionID && bridge.startSession) {
           const session = await bridge.startSession({ projectPath, model: effectiveModel, agent: selectedAgent });
           sessionID = session.sessionID || session.id || "";
-          if (sessionID) setActiveAgentSessionId(sessionID);
+          if (sessionID) {
+            dispatchAgentRuntime({ type: "sessionStarted", requestId, sessionID, model: effectiveModel, title: "session started" });
+          }
         }
         const result = await bridge.prompt({
           projectPath,
@@ -1240,29 +1783,22 @@ export function App() {
           prompt: fullPrompt,
           requestId,
           permissionMode,
-          permissionRules: permissionRulesForMode(granularPermissions),
+          permissionRules: permissionRulesForMode(granularPermissions, customPermissionRules),
           planMode
         });
         const nextSessionID = result.sessionID || sessionID;
-        if (nextSessionID) setActiveAgentSessionId(nextSessionID);
-        setAgentMessages((messages) => messages.map((message) => (
-          message.id === assistantId
-            ? {
-              ...message,
-              text: result.stdout && result.stdout.length >= (message.text || "").length ? result.stdout : message.text || result.stdout || "",
-              meta: effectiveModel || "Code engine",
-              command: result.command,
-              exitCode: result.exitCode,
-              pending: false,
-              status: result.exitCode === 0 ? "done" : "failed",
-              sessionID: nextSessionID || message.sessionID,
-              messageID: result.messageID || message.messageID,
-              tools: result.tools || message.tools,
-              diff: result.diff || message.diff
-          }
-            : message
-        )));
-        setAgentActivityChips((chips) => [{ id: `prompt-${requestId}`, label: "done", tone: result.exitCode === 0 ? "success" as const : "danger" as const, sessionID: nextSessionID }, ...chips].slice(0, 10));
+        dispatchAgentRuntime({
+          type: "sessionDone",
+          requestId,
+          sessionID: nextSessionID,
+          messageID: result.messageID,
+          result,
+          text: result.stdout,
+          command: result.command,
+          exitCode: result.exitCode,
+          tools: result.tools,
+          diff: result.diff
+        });
         setAgentLog((log) => [`Prompt finished in ${nextSessionID || "Code"} with exit ${result.exitCode}.`, ...log].slice(0, 30));
         await refreshAgentSessions(projectPath);
         return;
@@ -1277,25 +1813,18 @@ export function App() {
         planMode
       });
       const responseText = `${result.stdout || ""}${result.stderr ? `\n${result.stderr}` : ""}`.trim() || "No response returned.";
-      setActiveAgentSessionId(result.sessionID || activeAgentSessionId);
-      setActiveAgentMessageId(result.messageID || activeAgentMessageId);
-      setAgentMessages((messages) => messages.map((message) => (
-        message.id === assistantId
-          ? {
-            ...message,
-            text: responseText,
-            meta: result.exitCode === 0 ? effectiveModel || "Code engine" : "Run failed",
-            command: result.command,
-            exitCode: result.exitCode,
-            pending: false,
-            status: result.exitCode === 0 ? "done" : "failed",
-            sessionID: result.sessionID || message.sessionID,
-            messageID: result.messageID || message.messageID,
-            tools: result.tools || message.tools,
-            diff: result.diff || message.diff
-          }
-          : message
-      )));
+      dispatchAgentRuntime({
+        type: "sessionDone",
+        requestId,
+        sessionID: result.sessionID || activeAgentSessionId,
+        messageID: result.messageID || activeAgentMessageId,
+        result,
+        text: responseText,
+        command: result.command,
+        exitCode: result.exitCode,
+        tools: result.tools,
+        diff: result.diff
+      });
       setAgentLog((log) => [`Prompt finished with exit ${result.exitCode}.`, ...log].slice(0, 30));
       setOutputLog((log) => [commandBlock("code run", result), ...log].slice(0, 20));
       await refreshAgentSessions(projectPath);
@@ -1307,21 +1836,8 @@ export function App() {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      setAgentMessages((messages) => messages.map((item) => (
-        item.id === assistantId
-          ? {
-            ...item,
-            text: `Code engine failed to run this prompt.\n\n${message}`,
-            meta: "Error",
-            exitCode: 1,
-            pending: false,
-            status: "failed"
-          }
-          : item
-      )));
+      dispatchAgentRuntime({ type: "sessionError", requestId, error: message });
       setAgentLog((log) => [`Prompt failed: ${message}`, ...log].slice(0, 30));
-    } finally {
-      setAgentBusy(false);
     }
   }, [
     activeAgentMessageId,
@@ -1330,20 +1846,25 @@ export function App() {
     agentBusy,
     agentCommands,
     agentPermissionMode,
+    customPermissionRules,
     granularPermissions,
     agentPlanMode,
     agentPrompt,
     agentContextMode,
     effectiveModel,
     gitState.changes,
+    diagnosticsSnapshot,
     projectPath,
     refreshAgentCapabilities,
     refreshAgentSessions,
     refreshFiles,
     refreshGit,
     refreshOpenTabsFromDisk,
+    references,
     selectedAgent,
     selectedCode,
+    sessionContext,
+    skills,
     tabs,
     terminalOutput
   ]);
@@ -1357,12 +1878,98 @@ export function App() {
   const stopAgent = useCallback(async () => {
     if (!activeAgentSessionId) return;
     await api.opencode.abort({ projectPath, sessionID: activeAgentSessionId });
-    setAgentBusy(false);
-    setAgentMessages((messages) => messages.map((message) => (
-      message.pending ? { ...message, pending: false, status: "stopped", text: message.text || "Stopped." } : message
-    )));
+    dispatchAgentRuntime({ type: "stop", sessionID: activeAgentSessionId });
     setAgentLog((log) => [`Stopped session ${activeAgentSessionId}.`, ...log].slice(0, 30));
   }, [activeAgentSessionId, projectPath]);
+
+  const waitAgentSession = useCallback(async (sessionID = activeAgentSessionId) => {
+    if (!projectPath || !sessionID) {
+      toast("Open a Code session before refreshing session state.", "info");
+      return;
+    }
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    try {
+      if (bridge.sessionWait) await bridge.sessionWait({ projectPath, sessionID, timeoutMS: 1000 });
+      await openAgentSession(sessionID);
+      await refreshAgentSessions(projectPath);
+      toast("Session refreshed.", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [activeAgentSessionId, openAgentSession, projectPath, refreshAgentSessions, toast]);
+
+  const compactAgentSession = useCallback(async (sessionID = activeAgentSessionId) => {
+    if (!projectPath || !sessionID) {
+      toast("Open a Code session before compacting.", "info");
+      return;
+    }
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.sessionCompact) {
+      toast("Session compact is not available in this build.", "info");
+      return;
+    }
+    try {
+      const result = await bridge.sessionCompact({ projectPath, sessionID });
+      if (result.ok) {
+        toast("Session compacted.", "success");
+        await waitAgentSession(sessionID);
+      } else {
+        toast(result.error || "Session compact failed.", "error");
+      }
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [activeAgentSessionId, projectPath, toast, waitAgentSession]);
+
+  const unrevertAgentSession = useCallback(async (sessionID = activeAgentSessionId) => {
+    if (!projectPath || !sessionID) {
+      toast("Open a Code session before recovering a revert.", "info");
+      return;
+    }
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    const unrevert = bridge.unrevert || bridge.sessionUnrevert;
+    if (!unrevert) {
+      toast("Session unrevert is not available in this build.", "info");
+      return;
+    }
+    try {
+      await unrevert({ projectPath, sessionID });
+      toast("Recovered last revert.", "success");
+      await refreshOpenTabsFromDisk(projectPath);
+      await refreshFiles(projectPath);
+      await refreshGit(projectPath);
+      await waitAgentSession(sessionID);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [activeAgentSessionId, projectPath, refreshFiles, refreshGit, refreshOpenTabsFromDisk, toast, waitAgentSession]);
+
+  const deleteAgentSession = useCallback(async (sessionID = activeAgentSessionId) => {
+    if (!projectPath || !sessionID) {
+      toast("No Code session selected.", "info");
+      return;
+    }
+    if (!window.confirm(`Delete Code session ${sessionID}?`)) return;
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    const deleteSession = bridge.deleteSession || bridge.sessionDelete;
+    if (!deleteSession) {
+      toast("Session delete is not available in this build.", "info");
+      return;
+    }
+    try {
+      const result = await deleteSession({ projectPath, sessionID });
+      if (result === false) {
+        toast("Session delete failed.", "error");
+        return;
+      }
+      dispatchAgentRuntime({ type: "reset" });
+      setSessionContext(null);
+      await refreshAgentSessions(projectPath);
+      toast("Session deleted.", "success");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [activeAgentSessionId, projectPath, refreshAgentSessions, toast]);
 
   const onSwitchModel = useCallback(async (model: string) => {
     setSelectedModel(model);
@@ -1392,7 +1999,7 @@ export function App() {
           const result = await bridge.sessionSwitchAgent({ projectPath, sessionID: activeAgentSessionId, agent });
           if (result.ok) {
             toast("Agent switched to " + agent, "success");
-            setAgentActivityChips((chips) => [{ id: `agent-switch-${Date.now()}`, label: "agent: " + agent, tone: "info" as const, sessionID: activeAgentSessionId }, ...chips].slice(0, 10));
+            dispatchAgentRuntime({ type: "activity", chip: { id: `agent-switch-${Date.now()}`, label: "agent: " + agent, tone: "info", sessionID: activeAgentSessionId } });
           } else {
             toast("Failed to switch agent for active session", "error");
           }
@@ -1414,18 +2021,24 @@ export function App() {
   }, [agentMessages, agentPermissionMode, agentPlanMode, submitAgentPrompt]);
 
   const replyAgentPermission = useCallback(async (sessionID: string, permission: AgentPermissionRequest, reply: "once" | "always" | "reject") => {
-    const requestID = String(permission.id || permission.requestID || permission.permissionID || "");
-    if (!sessionID || !requestID) return;
-    await api.opencode.permissionReply({ projectPath, sessionID, requestID, reply });
-    setAgentMessages((messages) => messages.map((message) => (
-      message.sessionID === sessionID
-        ? {
-          ...message,
-          permissions: (message.permissions || []).filter((item) => String(item.id || item.requestID || item.permissionID || "") !== requestID)
-        }
-        : message
-    )));
-  }, [projectPath]);
+    const requestID = uiText(permission.id || permission.requestID || permission.permissionID || "");
+    if (!sessionID || !requestID) {
+      toast("This permission request is missing a session or request id.", "error");
+      return;
+    }
+    try {
+      const result = await api.opencode.permissionReply({ projectPath, sessionID, requestID, reply });
+      if (result === false || (asRecord(result)?.ok === false)) {
+        throw new Error(uiText(asRecord(result)?.error, "Permission reply was rejected by Code."));
+      }
+      dispatchAgentRuntime({ type: "permissionResponded", sessionID, requestID });
+      toast(reply === "reject" ? "Permission denied." : reply === "always" ? "Permission allowed and saved." : "Permission allowed once.", reply === "reject" ? "info" : "success");
+      if (reply === "always") await loadSavedPermissions();
+      await refreshSessionContext(sessionID);
+    } catch (error) {
+      toast("Permission reply failed: " + (error instanceof Error ? error.message : String(error)), "error");
+    }
+  }, [loadSavedPermissions, projectPath, refreshSessionContext, toast]);
 
   const replyToQuestion = useCallback(async (question: AgentQuestion, reply: string) => {
     const bridge = api.opencode as OptionalOpenCodeBridge;
@@ -1452,12 +2065,77 @@ export function App() {
   const revertAgentTurn = useCallback(async (sessionID?: string, messageID?: string) => {
     const targetSession = sessionID || activeAgentSessionId;
     const targetMessage = messageID || activeAgentMessageId;
-    if (!targetSession || !targetMessage) return;
-    await api.opencode.revert({ projectPath, sessionID: targetSession, messageID: targetMessage });
-    setAgentLog((log) => [`Reverted session turn ${targetMessage}.`, ...log].slice(0, 30));
-    await refreshFiles(projectPath);
-    await refreshGit(projectPath);
-  }, [activeAgentMessageId, activeAgentSessionId, projectPath, refreshFiles, refreshGit]);
+    if (!targetSession || !targetMessage) {
+      toast("Open a Code turn before reverting changes.", "info");
+      return;
+    }
+    try {
+      const result = await api.opencode.revert({ projectPath, sessionID: targetSession, messageID: targetMessage });
+      const resultRecord = asRecord(result);
+      if (resultRecord && resultRecord.ok === false) {
+        toast(uiText(resultRecord.error, "Code could not revert that turn."), "error");
+        return;
+      }
+      toast("Code turn reverted.", "success");
+      dispatchAgentRuntime({ type: "diffUpdated", sessionID: targetSession, messageID: targetMessage, diff: [] });
+      setAgentLog((log) => [`Reverted session turn ${targetMessage}.`, ...log].slice(0, 30));
+      await refreshOpenTabsFromDisk(projectPath);
+      await refreshFiles(projectPath);
+      await refreshGit(projectPath);
+      await refreshSessionContext(targetSession);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : String(error), "error");
+    }
+  }, [activeAgentMessageId, activeAgentSessionId, projectPath, refreshFiles, refreshGit, refreshOpenTabsFromDisk, refreshSessionContext, toast]);
+
+  const openAgentDiffFile = useCallback(async (file: AgentDiffFile) => {
+    if (!projectPath) return;
+    const rawPath = uiText(file.path || file.file);
+    if (!rawPath) {
+      toast("This diff file does not include a path.", "info");
+      return;
+    }
+    const normalizedPath = rawPath
+      .replace(/\\/g, "/")
+      .replace(/^([ab])\//, "")
+      .replace(`${projectPath.replace(/\\/g, "/").replace(/\/$/, "")}/`, "");
+    await openFile(normalizedPath, { pinned: true });
+  }, [openFile, projectPath, toast]);
+
+  const applyAgentPatch = useCallback(async (diff: AgentDiffFile[] = []) => {
+    if (!projectPath) return;
+    const patch = patchFromDiffFiles(diff);
+    if (!patch.trim()) {
+      toast("This Code response has no patch content to apply.", "info");
+      return;
+    }
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    const applyPatch = bridge.vcsApply || bridge.vcsPatch;
+    if (!applyPatch) {
+      toast("Patch apply is not available in this build.", "error");
+      return;
+    }
+    const check = await applyPatch({ projectPath, patch, check: true });
+    if (!check.ok) {
+      toast(check.error || check.stderr || "Patch cannot be applied cleanly.", "error");
+      setOutputLog((log) => [commandBlock("check patch", commandResultFromUnknown("git apply --check", check)), ...log].slice(0, 20));
+      setIsBottomOpen(true);
+      setBottomPanel("output");
+      return;
+    }
+    const result = await applyPatch({ projectPath, patch });
+    setOutputLog((log) => [commandBlock("apply patch", commandResultFromUnknown("git apply", result)), ...log].slice(0, 20));
+    setIsBottomOpen(true);
+    setBottomPanel("output");
+    if (result.ok) {
+      toast("Patch applied.", "success");
+      await refreshOpenTabsFromDisk(projectPath);
+      await refreshFiles(projectPath);
+      await refreshGit(projectPath);
+    } else {
+      toast(result.error || result.stderr || "Patch apply failed.", "error");
+    }
+  }, [projectPath, refreshFiles, refreshGit, refreshOpenTabsFromDisk, toast]);
 
   const runGitCommand = async (command: "fetch" | "pull" | "push" | "status") => {
     if (!projectPath) return;
@@ -1469,6 +2147,72 @@ export function App() {
     setCommandEvent({ id: uid(), text: block });
     await refreshGit(projectPath);
   };
+
+  const refreshAgentDiff = useCallback(async () => {
+    if (!projectPath) return;
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (bridge.vcsDiff) {
+      const result = await withApiError(bridge.vcsDiff({ projectPath }), toast);
+      if (!result) return;
+      const resultRecord = asRecord(result) || {};
+      const diffValue = result.diff || resultRecord.patch || resultRecord.stdout || resultRecord.fallback;
+      const diffFiles = diffFilesFromUnknown(diffValue, "workspace.diff");
+      if (diffFiles.length && activeAgentSessionId) {
+        dispatchAgentRuntime({ type: "diffUpdated", sessionID: activeAgentSessionId, messageID: activeAgentMessageId, diff: diffFiles });
+        setAgentLog((log) => [`Loaded ${diffFiles.length} workspace diff ${diffFiles.length === 1 ? "file" : "files"} into Code.`, ...log].slice(0, 30));
+        toast(`Loaded ${diffFiles.length} changed ${diffFiles.length === 1 ? "file" : "files"}.`, "success");
+        return;
+      }
+      const diffText = typeof diffValue === "string" ? diffValue : diffValue ? safeJsonPreview(diffValue) : "";
+      const commandResult = commandResultFromUnknown(result.command || "git diff", {
+        ok: result.ok,
+        stdout: diffText || "No workspace changes.",
+        stderr: result.error || "",
+        command: result.command || "git diff"
+      });
+      const block = commandBlock("git diff", commandResult);
+      setIsBottomOpen(true);
+      setBottomPanel("output");
+      setOutputLog((log) => [block, ...log].slice(0, 20));
+      setCommandEvent({ id: uid(), text: block });
+      return;
+    }
+    if (!activeAgentSessionId) {
+      toast("Open a Code session before reading session diff.", "info");
+      return;
+    }
+    if (!bridge.diff) {
+      toast("Session diff is not available in this build.", "info");
+      return;
+    }
+    const diff = (await withApiError(bridge.diff({ projectPath, sessionID: activeAgentSessionId }), toast)) ?? [];
+    dispatchAgentRuntime({ type: "diffUpdated", sessionID: activeAgentSessionId, diff });
+    setAgentLog((log) => [`Loaded ${diff.length} session diff ${diff.length === 1 ? "file" : "files"} for ${activeAgentSessionId}.`, ...log].slice(0, 30));
+    await refreshSessionContext(activeAgentSessionId);
+  }, [activeAgentMessageId, activeAgentSessionId, projectPath, refreshSessionContext, toast]);
+
+  const runOptionalGitAction = useCallback(async (action: "stage" | "unstage") => {
+    if (!projectPath) return;
+    const codeBridge = api.opencode as OptionalOpenCodeBridge;
+    const gitBridge = api.git as OptionalGitBridge;
+    const target = activePath || gitState.changes[0]?.path || ".";
+    const codeFn = action === "stage" ? codeBridge.vcsStage : codeBridge.vcsUnstage;
+    const gitFn = action === "stage" ? gitBridge.stage : gitBridge.unstage;
+    if (!codeFn && !gitFn) {
+      toast(`Git ${action} is not available from the renderer bridge yet.`, "info");
+      return;
+    }
+    const rawResult = codeFn
+      ? await codeFn({ projectPath, file: target, files: [target] })
+      : await gitFn!(projectPath, target);
+    const result = commandResultFromUnknown(`git ${action} ${target}`, rawResult);
+    const block = commandBlock(`git ${action}`, result);
+    setIsBottomOpen(true);
+    setBottomPanel("output");
+    setOutputLog((log) => [block, ...log].slice(0, 20));
+    setCommandEvent({ id: uid(), text: block });
+    await refreshGit(projectPath);
+  }, [activePath, gitState.changes, projectPath, refreshGit, toast]);
 
   const startAiAction = useCallback((label: string) => {
     const editor = editorRef.current;
@@ -1513,6 +2257,7 @@ export function App() {
         if (result.ok) {
           setMcpConfig(result.mcpConfig || { servers: {} });
           setMcpDirty(false);
+          setMcpSnapshot(summarizeMcpSnapshot(result.mcpConfig || { servers: {} }, mcpSnapshot.integrations));
         } else {
           toast("Failed to load MCP config: " + (result.error || "Unknown error"), "error");
         }
@@ -1538,6 +2283,7 @@ export function App() {
     { id: "ai.explain", label: "AI: Explain Selection", detail: "Explain highlighted code", run: () => startAiAction("Explain this code") },
     { id: "ai.tests", label: "AI: Generate Tests", detail: "Create test suggestions", run: () => startAiAction("Generate tests for this code") },
     { id: "terminal.open", label: "Terminal: Focus Terminal", detail: "Ctrl+`", run: () => { setIsBottomOpen(true); setBottomPanel("terminal"); } },
+    { id: "diagnostics.refresh", label: "Problems: Refresh Diagnostics", detail: "Read Code formatter and LSP status", run: () => { setIsBottomOpen(true); setBottomPanel("problems"); refreshDiagnostics(projectPath); } },
     { id: "git.refresh", label: "Git: Refresh Source Control", detail: "Read git status", run: () => refreshGit(projectPath) },
     { id: "settings.minimap", label: `Editor: ${minimap ? "Hide" : "Show"} Minimap`, detail: "Toggle minimap", run: () => setMinimap((value) => !value) },
     { id: "config.open", label: "Code: Open Configuration", detail: "Edit opencode.json", run: () => { loadConfigIntoEditor(); setConfigEditorOpen(true); } },
@@ -1626,7 +2372,7 @@ export function App() {
         toast("CLI error: " + (error instanceof Error ? error.message : String(error)), "error");
       }
     } }
-  ], [loadConfigIntoEditor, loadMCPConfig, minimap, openAgent, projectPath, refreshGit, startAiAction, toast, setOutputLog, setCommandEvent]);
+  ], [loadConfigIntoEditor, loadMCPConfig, minimap, openAgent, projectPath, refreshDiagnostics, refreshGit, startAiAction, toast, setOutputLog, setCommandEvent]);
 
   function openOverlay(mode: Exclude<OverlayMode, null>) {
     setOverlayMode(mode);
@@ -1642,6 +2388,7 @@ export function App() {
         if (result.ok) {
           toast("MCP configuration saved", "success");
           setMcpDirty(false);
+          setMcpSnapshot(summarizeMcpSnapshot(mcpConfig, mcpSnapshot.integrations));
         } else {
           toast("Failed to save MCP config: " + (result.error || "Unknown error"), "error");
         }
@@ -1649,7 +2396,7 @@ export function App() {
     } catch (error) {
       toast("Error saving MCP config: " + (error instanceof Error ? error.message : String(error)), "error");
     }
-  }, [projectPath, mcpConfig, toast]);
+  }, [projectPath, mcpConfig, mcpSnapshot.integrations, toast]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1753,6 +2500,7 @@ export function App() {
         "app-shell opencode-shell vscode-workbench",
         !isSidebarOpen ? "sidebar-collapsed" : "",
         !isAgentOpen ? "agent-collapsed" : "",
+        isAgentOpen && isAgentExpanded ? "agent-expanded" : "",
         !isBottomOpen ? "bottom-collapsed" : ""
       ].filter(Boolean).join(" ")}
       style={{
@@ -1919,7 +2667,9 @@ export function App() {
               ) : (
                 <WelcomeEditor
                   projectPath={projectPath}
+                  recentProjects={recentProjects}
                   onOpenProject={openProject}
+                  onOpenRecentProject={openWorkspacePath}
                   onQuickOpen={() => openOverlay("quickOpen")}
                   onOpenAgent={() => openAgent(starterPrompt)}
                 />
@@ -1938,19 +2688,21 @@ export function App() {
                   setActivePanel={setBottomPanel}
                   outputLog={outputLog}
                   agentLog={agentLog}
+                  diagnostics={diagnosticsSnapshot}
+                  onRefreshDiagnostics={() => refreshDiagnostics(projectPath)}
                   onClose={() => setIsBottomOpen(false)}
                 />
               </div>
             ) : null}
           </div>
 
-          {isAgentOpen ? <div className="resize-handle vertical right-resize" onMouseDown={startResize("agent", setAgentWidth)} /> : null}
+          {isAgentOpen && !isAgentExpanded ? <div className="resize-handle vertical right-resize" onMouseDown={startResize("agent", setAgentWidth)} /> : null}
 
           {isAgentOpen ? (
             <AgentPanel
               modelOptions={modelOptions}
               selectedModel={selectedModel}
-              setSelectedModel={setSelectedModel}
+              setSelectedModel={onSwitchModel}
               effectiveModel={effectiveModel}
               ollamaOnline={ollamaOnline}
               ollamaModels={ollamaModels}
@@ -1961,7 +2713,7 @@ export function App() {
               setAgentPrompt={setAgentPrompt}
               agentMessages={agentMessages}
               activityChips={agentActivityChips}
-              todos={todosFromMessages(agentMessages)}
+              todos={agentRuntimeTodos}
               agentLog={agentLog}
               agentBusy={agentBusy}
               activeSessionId={activeAgentSessionId}
@@ -1969,11 +2721,26 @@ export function App() {
               agentCommands={agentCommands}
               agentProviderState={agentProviderState}
               agentProviderAuth={agentProviderAuth}
+              sessionContext={sessionContext}
+              sessionContextBusy={sessionContextBusy}
+              onRefreshSessionContext={() => refreshSessionContext(activeAgentSessionId)}
+              gitState={gitState}
+              gitActionAvailability={gitActionAvailability}
+              onRefreshGit={() => refreshGit(projectPath)}
+              onRefreshSessionDiff={refreshAgentDiff}
+              onGitStage={() => runOptionalGitAction("stage")}
+              onGitUnstage={() => runOptionalGitAction("unstage")}
+              mcpSnapshot={mcpSnapshot}
+              onMcpConnectionChange={changeMcpConnection}
+              onRefreshMcpSnapshot={() => refreshMcpSnapshot(projectPath)}
+              onOpenMcpConfig={() => { refreshMcpSnapshot(projectPath); setMcpEditorOpen(true); }}
               slashItems={dynamicSlashCommands}
               permissionMode={agentPermissionMode}
               setPermissionMode={setAgentPermissionMode}
               granularPermissions={granularPermissions}
               setGranularPermissions={setGranularPermissions}
+              customPermissionRules={customPermissionRules}
+              setCustomPermissionRules={setCustomPermissionRules}
               savedPermissions={savedPermissions}
               onRevokeSavedPermission={async (id: string) => {
                 try {
@@ -1998,12 +2765,18 @@ export function App() {
               onRetry={retryLastAgentPrompt}
               onOpenSession={openAgentSession}
               onNewSession={startNewAgentSession}
+              onRefreshSession={waitAgentSession}
+              onCompactSession={compactAgentSession}
+              onUnrevertSession={unrevertAgentSession}
+              onDeleteSession={deleteAgentSession}
               onForkSession={forkAgentSession}
               onPermissionReply={replyAgentPermission}
               agentList={agentList}
               selectedAgent={selectedAgent}
               onSwitchAgent={onSwitchAgent}
               onRevert={revertAgentTurn}
+              onApplyPatch={applyAgentPatch}
+              onOpenDiffFile={openAgentDiffFile}
               pendingQuestions={pendingQuestions}
               skills={skills}
               references={references}
@@ -2013,7 +2786,12 @@ export function App() {
               setReferencesOpen={setReferencesOpen}
               onReplyToQuestion={replyToQuestion}
               onRejectQuestion={rejectQuestion_}
-              onClose={() => setIsAgentOpen(false)}
+              isExpanded={isAgentExpanded}
+              onToggleExpanded={() => setIsAgentExpanded((value) => !value)}
+              onClose={() => {
+                setIsAgentExpanded(false);
+                setIsAgentOpen(false);
+              }}
             />
           ) : null}
         </div>
@@ -2571,17 +3349,48 @@ function contextPrompt(
   selectedCode?: string,
   openTabs: string[] = [],
   gitChanges: Array<{ status: string; path: string }> = [],
-  terminalOutput = ""
+  terminalOutput = "",
+  extra: {
+    projectPath?: string;
+    sessionID?: string;
+    sessionContext?: AgentSessionContextSummary | null;
+    skills?: SkillInfo[];
+    references?: ReferenceInfo[];
+    diagnostics?: DiagnosticsSnapshot;
+  } = {}
 ) {
+  const skillSummary = (extra.skills || [])
+    .slice(0, 8)
+    .map((skill) => uiText(skill.name || skill.id || skill.source, "skill"))
+    .filter(Boolean)
+    .join(", ");
+  const referenceSummary = (extra.references || [])
+    .slice(0, 8)
+    .map((reference) => uiText(reference.title || reference.id || reference.path || reference.source, "reference"))
+    .filter(Boolean)
+    .join(", ");
+  const diagnosticsSummary = extra.diagnostics
+    ? [
+      extra.diagnostics.formatter ? `formatter=${extra.diagnostics.formatter.ok === false ? "unavailable" : "available"}` : "",
+      extra.diagnostics.lsp ? `lsp=${extra.diagnostics.lsp.ok === false ? "unavailable" : "available"}` : "",
+      extra.diagnostics.error ? `diagnosticsError=${extra.diagnostics.error}` : ""
+    ].filter(Boolean).join(", ")
+    : "";
   return [
     prompt,
     "\n--- GUI context ---",
+    extra.projectPath ? `\nWorkspace: ${extra.projectPath}` : "",
+    extra.sessionID ? `\nSession: ${extra.sessionID}` : "",
     `\nContext mode: ${contextMode}`,
     ["selection", "file", "openTabs", "workspace"].includes(contextMode) && filePath ? `\nCurrent file: ${filePath}` : "",
     contextMode === "selection" && selectedCode ? `\nSelected code:\n${selectedCode}` : "",
     contextMode !== "selection" && selectedCode ? `\nAvailable selected code summary:\n${selectedCode.slice(0, 2000)}` : "",
     ["openTabs", "workspace"].includes(contextMode) && openTabs.length ? `\nOpen tabs:\n${openTabs.join("\n")}` : "",
     contextMode === "workspace" && gitChanges.length ? `\nGit changes:\n${gitChanges.map((change) => `${change.status} ${change.path}`).join("\n")}` : "",
+    extra.sessionContext ? `\nSession summary: ${extra.sessionContext.summaryText}` : "",
+    skillSummary ? `\nRegistered skills: ${skillSummary}` : "",
+    referenceSummary ? `\nProject references: ${referenceSummary}` : "",
+    diagnosticsSummary ? `\nEngine diagnostics: ${diagnosticsSummary}` : "",
     contextMode === "workspace" && terminalOutput ? `\nRecent terminal output:\n${terminalOutput.slice(-4000)}` : ""
   ].filter(Boolean).join("\n");
 }
@@ -2790,16 +3599,20 @@ function Breadcrumbs({ path, onOpen }: { path: string; onOpen: (path: string) =>
 
 function WelcomeEditor({
   projectPath,
+  recentProjects,
   onOpenProject,
+  onOpenRecentProject,
   onQuickOpen,
   onOpenAgent
 }: {
   projectPath: string;
+  recentProjects: string[];
   onOpenProject: () => void;
+  onOpenRecentProject: (projectPath: string) => void;
   onQuickOpen: () => void;
   onOpenAgent: () => void;
 }) {
-  const recent = ["producers-wave-backend", "jackcoins-ton", "python-exercise", "producer-wave-admin", "erelgo"];
+  const recent = recentProjects.filter(Boolean);
   return (
     <div className="welcome-workspace">
       <div className="welcome-inner">
@@ -2816,12 +3629,14 @@ function WelcomeEditor({
           </div>
           <div className="welcome-recent">
             <h2>Recent</h2>
-            {recent.map((item) => (
-              <div key={item}>
-                <span>{item}</span>
-                <small>~/Documents</small>
-              </div>
-            ))}
+            {recent.length ? recent.map((item) => (
+              <button key={item} type="button" onClick={() => onOpenRecentProject(item)}>
+                <span>{projectName(item)}</span>
+                <small>{item}</small>
+              </button>
+            )) : (
+              <p>No recent folders yet.</p>
+            )}
             <small className="current-project">{projectPath}</small>
           </div>
         </section>
@@ -2858,11 +3673,26 @@ function AgentPanel({
   agentCommands,
   agentProviderState,
   agentProviderAuth,
+  sessionContext,
+  sessionContextBusy,
+  onRefreshSessionContext,
+  gitState,
+  gitActionAvailability,
+  onRefreshGit,
+  onRefreshSessionDiff,
+  onGitStage,
+  onGitUnstage,
+  mcpSnapshot,
+  onMcpConnectionChange,
+  onRefreshMcpSnapshot,
+  onOpenMcpConfig,
   slashItems,
   permissionMode,
   setPermissionMode,
   granularPermissions,
   setGranularPermissions,
+  customPermissionRules,
+  setCustomPermissionRules,
   savedPermissions,
   onRevokeSavedPermission,
   planMode,
@@ -2877,11 +3707,18 @@ function AgentPanel({
   onRetry,
   onOpenSession,
   onNewSession,
+  onRefreshSession,
+  onCompactSession,
+  onUnrevertSession,
+  onDeleteSession,
   onForkSession,
   onPermissionReply,
   agentList,
   selectedAgent,
   onSwitchAgent,
+  onRevert,
+  onApplyPatch,
+  onOpenDiffFile,
   pendingQuestions,
   skills,
   references,
@@ -2891,6 +3728,8 @@ function AgentPanel({
   setReferencesOpen,
   onReplyToQuestion,
   onRejectQuestion,
+  isExpanded,
+  onToggleExpanded,
   onClose
 }: {
   modelOptions: string[];
@@ -2903,7 +3742,7 @@ function AgentPanel({
   activePath: string;
   projectPath: string;
   agentPrompt: string;
-  setAgentPrompt: (value: string) => void;
+  setAgentPrompt: Dispatch<SetStateAction<string>>;
   agentMessages: AgentMessage[];
   activityChips: AgentActivityChip[];
   todos: AgentTodoItem[];
@@ -2914,11 +3753,26 @@ function AgentPanel({
   agentCommands: AgentCommandInfo[];
   agentProviderState: AgentProviderState;
   agentProviderAuth: AgentProviderAuthMap;
+  sessionContext: AgentSessionContextSummary | null;
+  sessionContextBusy: boolean;
+  onRefreshSessionContext: () => void;
+  gitState: GitState;
+  gitActionAvailability: GitActionAvailability;
+  onRefreshGit: () => void;
+  onRefreshSessionDiff: () => void;
+  onGitStage: () => void;
+  onGitUnstage: () => void;
+  mcpSnapshot: AgentMcpSnapshot;
+  onMcpConnectionChange: (name: string, connect: boolean) => void;
+  onRefreshMcpSnapshot: () => void | Promise<void>;
+  onOpenMcpConfig: () => void;
   slashItems: Array<{ command: string; label: string; prompt: string; source?: string; hints?: string[] }>;
   permissionMode: string;
   setPermissionMode: (value: string) => void;
-  granularPermissions: Record<string, "allow" | "ask" | "deny">;
-  setGranularPermissions: (value: Record<string, "allow" | "ask" | "deny"> | ((prev: Record<string, "allow" | "ask" | "deny">) => Record<string, "allow" | "ask" | "deny">)) => void;
+  granularPermissions: Record<string, PermissionEffect>;
+  setGranularPermissions: (value: Record<string, PermissionEffect> | ((prev: Record<string, PermissionEffect>) => Record<string, PermissionEffect>)) => void;
+  customPermissionRules: EditablePermissionRule[];
+  setCustomPermissionRules: (value: EditablePermissionRule[] | ((prev: EditablePermissionRule[]) => EditablePermissionRule[])) => void;
   savedPermissions: SavedPermission[];
   onRevokeSavedPermission: (id: string) => void;
   planMode: boolean;
@@ -2933,12 +3787,18 @@ function AgentPanel({
   onRetry: () => void;
   onOpenSession: (sessionID: string) => void;
   onNewSession: () => void;
+  onRefreshSession: (sessionID?: string) => void;
+  onCompactSession: (sessionID?: string) => void;
+  onUnrevertSession: (sessionID?: string) => void;
+  onDeleteSession: (sessionID?: string) => void;
   onForkSession: (sessionID?: string, messageID?: string) => void;
   onPermissionReply: (sessionID: string, permission: AgentPermissionRequest, reply: "once" | "always" | "reject") => void;
   agentList: Array<{ name: string; mode?: string; description?: string }>;
   selectedAgent: string;
   onSwitchAgent: (agent: string) => void;
   onRevert: (sessionID?: string, messageID?: string) => void;
+  onApplyPatch: (diff: AgentDiffFile[]) => void;
+  onOpenDiffFile: (file: AgentDiffFile) => void;
   pendingQuestions: AgentQuestion[];
   skills: SkillInfo[];
   references: ReferenceInfo[];
@@ -2948,6 +3808,8 @@ function AgentPanel({
   setReferencesOpen: (value: boolean | ((current: boolean) => boolean)) => void;
   onReplyToQuestion: (question: AgentQuestion, reply: string) => void;
   onRejectQuestion: (question: AgentQuestion) => void;
+  isExpanded: boolean;
+  onToggleExpanded: () => void;
   onClose: () => void;
 }) {
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
@@ -2955,14 +3817,111 @@ function AgentPanel({
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
+  const [mcpMenuOpen, setMcpMenuOpen] = useState(false);
   const [providerNotice, setProviderNotice] = useState("");
   const [activeOAuthAttempt, setActiveOAuthAttempt] = useState<OAuthAttempt | null>(null);
   const [providerCredentials, setProviderCredentials] = useState<Record<string, CredentialInfo[]>>({});
+  const [mcpPrompts, setMcpPrompts] = useState<Record<string, unknown>[]>([]);
+  const [mcpResources, setMcpResources] = useState<Record<string, unknown>[]>([]);
+  const [mcpAssetBusy, setMcpAssetBusy] = useState(false);
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
   const modelLabel = selectedModel ? selectedModel.split("/").pop() || selectedModel : (ollamaOnline ? "Choose model" : "Ollama offline");
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const connectedProviders = new Set(agentProviderState.connected || []);
-  const providerCount = agentProviderState.all.length || (ollamaOnline ? 1 : 0);
+  const providerList = agentProviderState.all.length ? agentProviderState.all : [{ id: "ollama", name: "Ollama", kind: "local" }];
+  const providerCount = providerList.length || (ollamaOnline ? 1 : 0);
   const authProviderCount = Object.keys(agentProviderAuth || {}).length;
+  const providerRows = providerList.slice(0, 8).map((provider) => {
+    const id = uiText((provider as any).id || (provider as any).name, "provider");
+    const authMethods = (provider as IntegrationInfo)?.auth || agentProviderAuth[id] || [];
+    const providerCreds = providerCredentials[id] || [];
+    const connected = connectedProviders.has(id) || Boolean((provider as any).connected) || (id === "ollama" && ollamaOnline);
+    const kind = uiText((provider as any).kind || (provider as any).type || (id === "ollama" ? "local" : "provider"), "provider");
+    const keyMethods = authMethods.filter((method) => method.type === "api" || method.type === "key").length;
+    const oauthMethods = authMethods.filter((method) => method.type === "oauth").length;
+    const statusClass = connected
+      ? "connected"
+      : providerCreds.length
+        ? "credential"
+        : authMethods.length
+          ? "needs-auth"
+          : "command";
+    const authLabel = connected
+      ? "connected"
+      : providerCreds.length
+        ? `${providerCreds.length} ${providerCreds.length === 1 ? "key" : "keys"}`
+        : authMethods.length
+          ? [keyMethods ? `${keyMethods} key` : "", oauthMethods ? `${oauthMethods} OAuth` : ""].filter(Boolean).join(" / ") || "auth"
+          : "command";
+    return {
+      id,
+      label: uiText((provider as any).name || (provider as any).label, id),
+      kind,
+      connected,
+      authLabel,
+      credentialCount: providerCreds.length,
+      statusClass,
+      methodCount: authMethods.length
+    };
+  });
+  const readyProviderCount = providerRows.filter((provider) => provider.connected || provider.credentialCount > 0 || provider.statusClass === "command").length;
+  const needsAuthCount = providerRows.filter((provider) => provider.statusClass === "needs-auth").length;
+  const providerStatusText = needsAuthCount
+    ? `${needsAuthCount} provider ${needsAuthCount === 1 ? "needs" : "need"} setup`
+    : ollamaOnline
+      ? "Local Ollama ready"
+      : "Provider commands ready";
+  const permissionCounts = {
+    allow: Object.values(granularPermissions).filter((value) => value === "allow").length,
+    ask: Object.values(granularPermissions).filter((value) => value === "ask").length,
+    deny: Object.values(granularPermissions).filter((value) => value === "deny").length
+  };
+  const customRuleCounts = {
+    allow: customPermissionRules.filter((rule) => rule.action === "allow").length,
+    ask: customPermissionRules.filter((rule) => rule.action === "ask").length,
+    deny: customPermissionRules.filter((rule) => rule.action === "deny").length
+  };
+  const permissionLabel = customPermissionRules.length
+    ? `${customPermissionRules.length} rules`
+    : permissionCounts.ask === 0 && permissionCounts.deny === 0
+    ? "Full access"
+    : permissionCounts.deny > 0
+      ? `${permissionCounts.deny} deny`
+      : `${permissionCounts.ask} ask`;
+  const addPermissionRule = () => setCustomPermissionRules((current) => [...current, createPermissionRule()]);
+  const updatePermissionRule = (id: string, patch: Partial<EditablePermissionRule>) => {
+    setCustomPermissionRules((current) => current.map((rule) => rule.id === id ? { ...rule, ...patch } : rule));
+  };
+  const removePermissionRule = (id: string) => {
+    setCustomPermissionRules((current) => current.filter((rule) => rule.id !== id));
+  };
+  const modelParts = (model: string) => {
+    const [provider, ...rest] = model.split("/");
+    return {
+      provider: rest.length ? provider : "model",
+      name: rest.length ? rest.join("/") : model
+    };
+  };
+  const commandGroups = {
+    mcp: agentCommands.filter((command) => uiText(command.source).toLowerCase() === "mcp"),
+    project: agentCommands.filter((command) => uiText(command.source).toLowerCase() !== "mcp")
+  };
+  const mcpItemsFromResult = (result: unknown, key: "prompts" | "resources") => {
+    const record = asRecord(result);
+    const items = Array.isArray(record?.[key])
+      ? record?.[key]
+      : Array.isArray(record?.data)
+        ? record?.data
+        : Array.isArray(result)
+          ? result
+          : [];
+    return items.filter(asRecord).slice(0, 8);
+  };
+  const mcpItemTitle = (item: Record<string, unknown>, fallback: string) =>
+    uiText(item.name || item.title || item.uri || item.url || item.id, fallback);
+  const mcpItemMeta = (item: Record<string, unknown>) =>
+    uiText(item.server || item.source || item.type || item.description || item.mimeType, "mcp");
   const openMenu = (menu: "plus" | "access" | "model") => {
     setPlusMenuOpen(menu === "plus" ? (value) => !value : false);
     setAccessMenuOpen(menu === "access" ? (value) => !value : false);
@@ -2970,11 +3929,187 @@ function AgentPanel({
     setProviderMenuOpen(false);
     setSessionMenuOpen(false);
     setAgentMenuOpen(false);
+    setContextMenuOpen(false);
+    setMcpMenuOpen(false);
   };
   const visibleSlashCommands = agentPrompt.trim().startsWith("/")
     ? slashItems.filter((item) => item.command.includes(agentPrompt.trim().split(/\s+/)[0])).slice(0, 10)
     : [];
   const visibleActivityChips = compactActivityChips(activityChips);
+  const todoText = (todo: AgentTodoItem) => uiText(todo.content || todo.title || todo.text, "Task");
+  const openTodoCount = todos.filter((todo) => {
+    const status = uiText(todo.status).toLowerCase();
+    return status !== "done" && status !== "completed" && status !== "complete";
+  }).length;
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => composerInputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    const input = composerInputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(Math.max(input.scrollHeight, 58), 140)}px`;
+  }, [agentPrompt]);
+
+  useEffect(() => {
+    if (!providerMenuOpen || !projectPath) return;
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.credentials) return;
+    let disposed = false;
+    bridge.credentials({ projectPath }).then((credentials) => {
+      if (disposed || !Array.isArray(credentials)) return;
+      const grouped: Record<string, CredentialInfo[]> = {};
+      for (const credential of credentials) {
+        const providerID = credential.integrationID
+          || providerRows.find((provider) => {
+            const needle = `${credential.id} ${credential.label || ""}`.toLowerCase();
+            return needle.includes(provider.id.toLowerCase());
+          })?.id
+          || "__workspace";
+        grouped[providerID] = [...(grouped[providerID] || []), credential];
+      }
+      setProviderCredentials(grouped);
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [providerMenuOpen, projectPath]);
+
+  useEffect(() => {
+    if (!mcpMenuOpen || !projectPath) return;
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    let disposed = false;
+    setMcpAssetBusy(true);
+    Promise.all([
+      bridge.mcpPromptList ? bridge.mcpPromptList({ projectPath }) : Promise.resolve({ prompts: [] }),
+      bridge.mcpResourceList ? bridge.mcpResourceList({ projectPath }) : Promise.resolve({ resources: [] })
+    ]).then(([promptsResult, resourcesResult]) => {
+      if (disposed) return;
+      setMcpPrompts(mcpItemsFromResult(promptsResult, "prompts"));
+      setMcpResources(mcpItemsFromResult(resourcesResult, "resources"));
+    }).catch(() => {
+      if (!disposed) {
+        setMcpPrompts([]);
+        setMcpResources([]);
+      }
+    }).finally(() => {
+      if (!disposed) setMcpAssetBusy(false);
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [mcpMenuOpen, projectPath]);
+
+  const useMcpPrompt = (prompt: Record<string, unknown>) => {
+    const name = mcpItemTitle(prompt, "prompt");
+    setAgentPrompt((current) => current || `Use MCP prompt "${name}" for this workspace.`);
+    setMcpMenuOpen(false);
+  };
+
+  const useMcpResource = async (resource: Record<string, unknown>) => {
+    const label = mcpItemTitle(resource, "resource");
+    const uri = uiText(resource.uri || resource.url || resource.name || resource.id);
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (bridge.mcpResourceRead && uri) {
+      try {
+        const result = await bridge.mcpResourceRead({ projectPath, uri, server: uiText(resource.server) });
+        const record = asRecord(result);
+        const preview = uiText(record?.resource || record?.data || record?.content, "", 800);
+        setAgentPrompt((current) => current || `Use MCP resource "${label}" as context.${preview ? `\n\nResource preview:\n${preview}` : ""}`);
+      } catch {
+        setAgentPrompt((current) => current || `Use MCP resource "${label}" as context.`);
+      }
+    } else {
+      setAgentPrompt((current) => current || `Use MCP resource "${label}" as context.`);
+    }
+    setMcpMenuOpen(false);
+  };
+
+  const createMcpServer = async () => {
+    const name = window.prompt("MCP server name");
+    if (!name) return;
+    const kind = (window.prompt("Server type: local or remote", "local") || "local").trim().toLowerCase();
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.mcpServerCreate) {
+      setAgentPrompt(`/mcp server create ${name}`);
+      setMcpMenuOpen(false);
+      return;
+    }
+    try {
+      const config = kind === "remote"
+        ? {
+          type: "remote",
+          url: window.prompt("Remote MCP server URL") || "",
+          oauth: window.confirm("Does this remote server use OAuth?")
+        }
+        : {
+          type: "local",
+          command: window.prompt("Local MCP command", "npx") || "",
+          arguments: (window.prompt("Arguments, separated by spaces", "") || "").split(/\s+/).filter(Boolean)
+        };
+      if ((config as any).type === "remote" && !(config as any).url) return;
+      if ((config as any).type === "local" && !(config as any).command) return;
+      const result = await bridge.mcpServerCreate({ projectPath, name, config });
+      setAgentPrompt((current) => current || `MCP server "${name}" was added. Use it as context when useful.`);
+      if ((result as any)?.ok === false) throw new Error((result as any)?.error || "MCP server create failed.");
+      await onRefreshMcpSnapshot();
+    } catch (error) {
+      setAgentPrompt((current) => current || `MCP server "${name}" failed to add: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const startMcpOauth = async (name: string) => {
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.mcpServerOauthStart) return;
+    try {
+      const result = await bridge.mcpServerOauthStart({ projectPath, name });
+      const record = asRecord(result?.result) || asRecord(result);
+      const url = uiText(record?.url || record?.authorizationURL || record?.authorizationUrl);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      await onRefreshMcpSnapshot();
+    } catch (error) {
+      setAgentPrompt((current) => current || `MCP OAuth failed for "${name}": ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const deleteMcpOauth = async (name: string) => {
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.mcpServerOauthDelete) return;
+    try {
+      await bridge.mcpServerOauthDelete({ projectPath, name });
+      await onRefreshMcpSnapshot();
+    } catch (error) {
+      setAgentPrompt((current) => current || `MCP OAuth cleanup failed for "${name}": ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  const deleteProviderCredential = async (credential: CredentialInfo) => {
+    const credentialID = uiText(credential.id);
+    if (!credentialID || !projectPath) return;
+    const label = uiText(credential.label || credential.integrationID || credentialID, credentialID);
+    if (!window.confirm(`Remove credential "${label}"?`)) return;
+    try {
+      const bridge = api.opencode as OptionalOpenCodeBridge;
+      if (!bridge.credentialDelete) throw new Error("Credential delete is not available in this engine build.");
+      const result = await bridge.credentialDelete({ projectPath, credentialID });
+      if ((result as any)?.ok === false) throw new Error((result as any)?.error || "Credential delete failed.");
+      setProviderCredentials((current) => {
+        const next: Record<string, CredentialInfo[]> = {};
+        for (const [providerID, credentials] of Object.entries(current)) {
+          const remaining = credentials.filter((item) => item.id !== credentialID);
+          if (remaining.length) next[providerID] = remaining;
+        }
+        return next;
+      });
+      setProviderNotice(`Removed credential "${label}".`);
+      onRefreshOllama();
+    } catch (error) {
+      setProviderNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   const connectProvider = async (providerID: string) => {
     // Find auth methods from the provider state (v2 integration info)
     const providerInfo = (agentProviderState.all || []).find(function(p) { return p.id === providerID || p.name === providerID; });
@@ -2983,7 +4118,7 @@ function AgentPanel({
     const oauthMethod = authMethods.find(function(m) { return m.type === "oauth"; });
     try {
       if (apiMethod) {
-        const key = window.prompt(`Enter API key for \${providerID}`);
+        const key = window.prompt(`Enter API key for ${providerID}`);
         if (!key) return;
         const bridge = api.opencode as any;
         if (bridge.integrations) {
@@ -2991,7 +4126,7 @@ function AgentPanel({
         } else {
           await api.opencode.providerApiKey({ projectPath, providerID, key });
         }
-        setProviderNotice(`\${providerID} API key saved.`);
+        setProviderNotice(`${providerID} API key saved.`);
         onRefreshOllama();
         return;
       }
@@ -3003,7 +4138,7 @@ function AgentPanel({
           if (auth?.url) {
             setActiveOAuthAttempt({ attemptID: auth.attemptID || "", url: auth.url, method: auth.method || "oauth", status: "pending" });
             window.open(auth.url, "_blank", "noopener,noreferrer");
-            setProviderNotice(`\${providerID} OAuth flow started. Complete auth in the browser.`);
+            setProviderNotice(`${providerID} OAuth flow started. Complete auth in the browser.`);
             // Start polling the attempt
             const pollTimer = window.setInterval(async function() {
               if (!auth.attemptID) { window.clearInterval(pollTimer); return; }
@@ -3012,12 +4147,12 @@ function AgentPanel({
                 if (status && (status.status === "completed" || status.status === "connected")) {
                   window.clearInterval(pollTimer);
                   setActiveOAuthAttempt(null);
-                  setProviderNotice(`\${providerID} connected via OAuth.`);
+                  setProviderNotice(`${providerID} connected via OAuth.`);
                   onRefreshOllama();
                 } else if (status && (status.status === "failed" || status.status === "error")) {
                   window.clearInterval(pollTimer);
                   setActiveOAuthAttempt(null);
-                  setProviderNotice(`\${providerID} OAuth failed: \${status.error || status.status}`);
+                  setProviderNotice(`${providerID} OAuth failed: ${status.error || status.status}`);
                 }
               } catch (_e) { /* poll error */ }
             }, 2000);
@@ -3028,21 +4163,21 @@ function AgentPanel({
         const auth = await api.opencode.providerAuthorize({ projectPath, providerID, method: 0 });
         if (auth?.url) window.open(auth.url, "_blank", "noopener,noreferrer");
         if (auth?.method === "code") {
-          const code = window.prompt((auth as any).instructions || `Paste \${providerID} authorization code`);
+          const code = window.prompt((auth as any).instructions || `Paste ${providerID} authorization code`);
           if (code) await api.opencode.providerCallback({ projectPath, providerID, method: 0, code });
         }
-        setProviderNotice((auth as any)?.instructions || `\${providerID} OAuth flow started.`);
+        setProviderNotice((auth as any)?.instructions || `${providerID} OAuth flow started.`);
         onRefreshOllama();
         return;
       }
-      setAgentPrompt(`/connect \${providerID}`);
-      setProviderNotice(`No direct auth form for \${providerID}. Added /connect command to composer.`);
+      setAgentPrompt(`/connect ${providerID}`);
+      setProviderNotice(`No direct auth form for ${providerID}. Added /connect command to composer.`);
     } catch (error) {
       setProviderNotice(error instanceof Error ? error.message : String(error));
     }
   };
   return (
-    <aside className="tutor-pane opencode-agent">
+    <aside className={`tutor-pane opencode-agent ${isExpanded ? "expanded" : ""}`} aria-expanded={isExpanded}>
       <header className="agent-chat-header">
         <div className="agent-tabs">
           <button>CHAT</button>
@@ -3050,6 +4185,15 @@ function AgentPanel({
         </div>
         <div className="agent-header-actions">
           <button className="icon-button tiny" title="Refresh models" onClick={onRefreshOllama}><RefreshCw size={15} /></button>
+          <button
+            className="agent-expand-toggle"
+            title={isExpanded ? "Restore assistant panel" : "Expand assistant panel"}
+            onClick={onToggleExpanded}
+            aria-pressed={isExpanded}
+          >
+            {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            <span>{isExpanded ? "Restore" : "Expand"}</span>
+          </button>
           <button className="icon-button tiny" title="Hide AI" onClick={onClose}><X size={15} /></button>
         </div>
       </header>
@@ -3068,7 +4212,9 @@ function AgentPanel({
             {agentBusy ? <X size={14} /> : <CirclePlay size={14} />}
           </button>
           <button className="icon-button tiny" title="Settings"><Settings2 size={14} /></button>
-          <button className="icon-button tiny" title="Expand"><Maximize2 size={14} /></button>
+          <button className="icon-button tiny agent-toolbar-expand" title={isExpanded ? "Restore panel" : "Expand panel"} onClick={onToggleExpanded}>
+            {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
         </div>
         {sessionMenuOpen ? (
           <div className="agent-session-popover">
@@ -3083,6 +4229,26 @@ function AgentPanel({
                 <small>{activeSessionId}</small>
               </button>
             ) : null}
+            {activeSessionId ? (
+              <>
+                <button onClick={() => { onRefreshSession(activeSessionId); setSessionMenuOpen(false); }}>
+                  <span>Refresh active session</span>
+                  <small>wait and reload messages</small>
+                </button>
+                <button onClick={() => { onCompactSession(activeSessionId); setSessionMenuOpen(false); }}>
+                  <span>Compact context</span>
+                  <small>reduce session tokens</small>
+                </button>
+                <button onClick={() => { onUnrevertSession(activeSessionId); setSessionMenuOpen(false); }}>
+                  <span>Recover last revert</span>
+                  <small>unrevert workspace changes</small>
+                </button>
+                <button className="danger" onClick={() => { onDeleteSession(activeSessionId); setSessionMenuOpen(false); }}>
+                  <span>Delete session</span>
+                  <small>remove from history</small>
+                </button>
+              </>
+            ) : null}
             {agentSessions.length ? agentSessions.slice(0, 8).map((session) => (
               <button key={session.id} className={session.id === activeSessionId ? "active" : ""} onClick={() => { onOpenSession(session.id); setSessionMenuOpen(false); }}>
                 <span>{session.title || session.id}</span>
@@ -3094,24 +4260,67 @@ function AgentPanel({
       </div>
 
       <div className="agent-capability-strip">
-        <button onClick={() => setProviderMenuOpen((value) => !value)}>
-          <span>{ollamaOnline ? "Ollama online" : "Ollama offline"}</span>
-          <strong>{providerCount} providers</strong>
+        <button
+          onClick={() => {
+            setProviderMenuOpen((value) => !value);
+            setContextMenuOpen(false);
+            setMcpMenuOpen(false);
+          }}
+          aria-label={needsAuthCount ? `${needsAuthCount} provider auth ${needsAuthCount === 1 ? "flow needs" : "flows need"} setup` : "Provider auth is ready"}
+        >
+          <span>{needsAuthCount ? `${needsAuthCount} setup` : "Auth ready"}</span>
+          <strong>{readyProviderCount}/{providerCount} providers</strong>
         </button>
-        <span>{agentCommands.length} commands</span>
-        <span>{authProviderCount} auth flows</span>
+        <button
+          onClick={() => {
+            setContextMenuOpen((value) => !value);
+            setProviderMenuOpen(false);
+            setMcpMenuOpen(false);
+            if (activeSessionId) onRefreshSessionContext();
+          }}
+          aria-label="Current session context"
+        >
+          <span>{sessionContextBusy ? "Refreshing" : "Context"}</span>
+          <strong>{sessionContext ? `${sessionContext.messageCount} msgs` : activeSessionId ? "session" : "none"}</strong>
+        </button>
+        <button
+          onClick={() => {
+            setMcpMenuOpen((value) => !value);
+            setProviderMenuOpen(false);
+            setContextMenuOpen(false);
+          }}
+          aria-label="MCP and project commands"
+        >
+          <span>{mcpSnapshot.activeServerCount}/{mcpSnapshot.serverCount} MCP</span>
+          <strong>{agentCommands.length} cmds</strong>
+        </button>
+        <button aria-label="Refresh Git status" onClick={onRefreshGit}>
+          <GitBranch size={12} />
+          <strong>{gitState.ok ? `${gitState.changes.length} VCS` : "no git"}</strong>
+        </button>
+        <button aria-label={gitActionAvailability.diff ? "Load VCS or session diff" : "Diff unavailable"} disabled={!gitActionAvailability.diff} onClick={onRefreshSessionDiff}>
+          <FileDiff size={12} />
+          <span>Diff</span>
+        </button>
+        <button aria-label={gitActionAvailability.stage ? "Stage current or first changed file" : "Stage unavailable"} disabled={!gitActionAvailability.stage} onClick={onGitStage}>
+          <span>{gitActionAvailability.stage ? "Stage" : "Stage unavailable"}</span>
+        </button>
+        <button aria-label={gitActionAvailability.unstage ? "Unstage current or first changed file" : "Unstage unavailable"} disabled={!gitActionAvailability.unstage} onClick={onGitUnstage}>
+          <span>{gitActionAvailability.unstage ? "Unstage" : "Unstage unavailable"}</span>
+        </button>
         <span>{effectiveModel || "No model"}</span>
-        <span title="Current agent">{selectedAgent ? "Agent: " + selectedAgent : "Agent: build"}</span>
-        <button className="capability-button" onClick={() => setSkillsOpen((v) => !v)} title="Registered skills">
+        <span aria-label="Current agent">{selectedAgent ? "Agent: " + selectedAgent : "Agent: build"}</span>
+        <button className="capability-button" onClick={() => setSkillsOpen((v) => !v)} aria-label="Registered skills">
           <span>{skills.length} skills</span>
         </button>
-        <button className="capability-button" onClick={() => setReferencesOpen((v) => !v)} title="Project references">
+        <button className="capability-button" onClick={() => setReferencesOpen((v) => !v)} aria-label="Project references">
           <span>{references.length} references</span>
         </button>
         {providerMenuOpen ? (
           <div className="agent-provider-popover">
             <div>
               <strong>Providers</strong>
+              <small>{providerStatusText}</small>
               <button className="icon-button tiny" onClick={onRefreshOllama}><RefreshCw size={13} /></button>
             </div>
             {activeOAuthAttempt ? (
@@ -3128,65 +4337,142 @@ function AgentPanel({
                 }}>Cancel</button>
               </div>
             ) : null}
-            {(agentProviderState.all.length ? agentProviderState.all : [{ id: "ollama", name: "Ollama", kind: "local" }]).slice(0, 10).map((provider) => {
-              const id = String((provider as any).id || (provider as any).name || "provider");
-              const providerCreds = providerCredentials[id] || [];
-              return (
-                <div key={id} className="agent-provider-section">
-                  <div className="agent-provider-row">
-                    <span>{(provider as any).name || (provider as any).label || id}</span>
-                    <small>{connectedProviders.has(id) || (id === "ollama" && ollamaOnline) ? "connected" : "available"}</small>
-                    <button onClick={() => connectProvider(id)}>
-                      {connectedProviders.has(id) || (id === "ollama" && ollamaOnline) ? "Manage" : "Connect"}
-                    </button>
-                  </div>
-                  {providerCreds.length > 0 ? (
-                    <div className="agent-credential-list">
-                      {providerCreds.map(function(cred: CredentialInfo) {
-                        return (
-                          <div key={cred.id} className="agent-credential-row">
-                            <span className="cred-label">{cred.label || cred.id.slice(0, 8)}</span>
-                            <span className="cred-type">{cred.type || "key"}</span>
-                            <button className="icon-button tiny" title="Edit label" onClick={async function() {
-                              const newLabel = window.prompt("Credential label", cred.label || "");
-                              if (newLabel !== null && newLabel !== cred.label) {
-                                const bridge = api.opencode as any;
-                                if (bridge.credentialUpdate) {
-                                  await bridge.credentialUpdate({ projectPath, credentialID: cred.id, label: newLabel });
-                                  setProviderCredentials(function(prev) {
-                                    const updated = { ...prev };
-                                    const list = (updated[id] || []).map(function(c) {
-                                      return c.id === cred.id ? { ...c, label: newLabel } : c;
-                                    });
-                                    updated[id] = list;
-                                    return updated;
-                                  });
-                                  setProviderNotice("Credential updated.");
-                                }
-                              }
-                            }}><Settings2 size={12} /></button>
-                            <button className="icon-button tiny danger" title="Delete credential" onClick={async function() {
-                              if (!window.confirm("Delete this credential?")) return;
-                              const bridge = api.opencode as any;
-                              if (bridge.credentialDelete) {
-                                await bridge.credentialDelete({ projectPath, credentialID: cred.id });
-                                setProviderCredentials(function(prev) {
-                                  const updated = { ...prev };
-                                  updated[id] = (updated[id] || []).filter(function(c) { return c.id !== cred.id; });
-                                  return updated;
-                                });
-                                setProviderNotice("Credential deleted.");
-                              }
-                            }}><Trash2 size={12} /></button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : null}
+            {providerRows.map((provider) => (
+              <div key={provider.id} className="agent-provider-stack">
+                <div className={`agent-provider-row ${provider.statusClass}`}>
+                  <span>
+                    <i aria-hidden="true" />
+                    <strong>{provider.label}</strong>
+                    <em>{provider.kind}</em>
+                  </span>
+                  <small title={`${provider.methodCount} auth ${provider.methodCount === 1 ? "method" : "methods"} detected`}>
+                    {provider.authLabel}
+                  </small>
+                  <button onClick={() => connectProvider(provider.id)}>
+                    {provider.statusClass === "command" ? "Command" : provider.connected || provider.credentialCount ? "Add auth" : "Connect"}
+                  </button>
                 </div>
-              );
-            })}
+                {(providerCredentials[provider.id] || []).map((credential) => (
+                  <div key={credential.id} className="agent-provider-credential-row">
+                    <span>
+                      <strong>{uiText(credential.label || credential.id, "Credential")}</strong>
+                      <em>{uiText(credential.type || credential.integrationID || provider.id, provider.id)}</em>
+                    </span>
+                    <button onClick={() => deleteProviderCredential(credential)}>Remove</button>
+                  </div>
+                ))}
+              </div>
+            ))}
+            {providerCredentials.__workspace?.length ? (
+              <p className="provider-inline-notice">{providerCredentials.__workspace.length} workspace credential {providerCredentials.__workspace.length === 1 ? "entry is" : "entries are"} available.</p>
+            ) : null}
             {providerNotice ? <p className="provider-inline-notice">{providerNotice}</p> : null}
+          </div>
+        ) : null}
+        {contextMenuOpen ? (
+          <div className="agent-session-popover">
+            <strong>Session context</strong>
+            {sessionContext ? (
+              <>
+                <div className="active">
+                  <span>{sessionContext.title}</span>
+                  <small>{sessionContext.updatedLabel}</small>
+                </div>
+                <div>
+                  <span>Messages</span>
+                  <small>{sessionContext.messageCount}</small>
+                </div>
+                <div>
+                  <span>Tools / todos</span>
+                  <small>{sessionContext.toolCount} / {sessionContext.todoCount}</small>
+                </div>
+                <div>
+                  <span>Diff / permissions</span>
+                  <small>{sessionContext.diffCount} / {sessionContext.permissionCount}</small>
+                </div>
+                {sessionContext.tokenCount || sessionContext.contextLimit ? (
+                  <div>
+                    <span>Tokens</span>
+                    <small>{[sessionContext.tokenCount, sessionContext.contextLimit].filter((value) => value !== undefined).join(" / ")}</small>
+                  </div>
+                ) : null}
+                <p>{sessionContext.summaryText}</p>
+                {sessionContext.unavailable ? <p>{sessionContext.unavailable}</p> : null}
+                {sessionContext.recent.map((message, index) => (
+                  <div key={`${message.role}-${index}`}>
+                    <span>{message.text}</span>
+                    <small>{message.role}</small>
+                  </div>
+                ))}
+                <button onClick={onRefreshSessionContext}>
+                  <span>Refresh context</span>
+                  <small>{sessionContextBusy ? "working" : sessionContext.sessionID}</small>
+                </button>
+              </>
+            ) : (
+              <p>{activeSessionId ? "Context is loading." : "Start or open a session to see context."}</p>
+            )}
+          </div>
+        ) : null}
+        {mcpMenuOpen ? (
+          <div className="agent-session-popover">
+            <strong>MCP and commands</strong>
+            <button onClick={onOpenMcpConfig}>
+              <span>Configure MCP servers</span>
+              <small>{mcpSnapshot.activeServerCount}/{mcpSnapshot.serverCount} active</small>
+            </button>
+            <button onClick={createMcpServer}>
+              <span>Add MCP server</span>
+              <small>local command or remote URL</small>
+            </button>
+            {mcpSnapshot.servers.slice(0, 5).map((server) => (
+              <div key={server.name} className="agent-mcp-server">
+                <span>{server.name}</span>
+                <small>{server.disabled ? "disabled" : server.type}</small>
+                <span className="agent-mcp-server-actions">
+                  <button onClick={() => onMcpConnectionChange(server.name, server.disabled)}>
+                    {server.disabled ? "Connect" : "Disconnect"}
+                  </button>
+                  <button onClick={() => startMcpOauth(server.name)}>OAuth</button>
+                  <button onClick={() => deleteMcpOauth(server.name)}>Clear</button>
+                </span>
+              </div>
+            ))}
+            {!mcpSnapshot.servers.length ? <p>No MCP servers configured.</p> : null}
+            {mcpSnapshot.integrations.length ? (
+              <div>
+                <span>Integrations</span>
+                <small>{mcpSnapshot.integrationCount}</small>
+              </div>
+            ) : null}
+            <div className="agent-mcp-assets">
+              <span>Prompts</span>
+              <small>{mcpAssetBusy ? "loading" : `${mcpPrompts.length} found`}</small>
+            </div>
+            {mcpPrompts.slice(0, 4).map((prompt, index) => (
+              <button key={`prompt:${mcpItemTitle(prompt, `prompt-${index}`)}:${index}`} onClick={() => useMcpPrompt(prompt)}>
+                <span>{mcpItemTitle(prompt, `Prompt ${index + 1}`)}</span>
+                <small>{mcpItemMeta(prompt)}</small>
+              </button>
+            ))}
+            <div className="agent-mcp-assets">
+              <span>Resources</span>
+              <small>{mcpAssetBusy ? "loading" : `${mcpResources.length} found`}</small>
+            </div>
+            {mcpResources.slice(0, 4).map((resource, index) => (
+              <button key={`resource:${mcpItemTitle(resource, `resource-${index}`)}:${index}`} onClick={() => useMcpResource(resource)}>
+                <span>{mcpItemTitle(resource, `Resource ${index + 1}`)}</span>
+                <small>{mcpItemMeta(resource)}</small>
+              </button>
+            ))}
+            {!mcpAssetBusy && !mcpPrompts.length && !mcpResources.length ? <p>No MCP prompts or resources exposed by active servers.</p> : null}
+            {[...commandGroups.mcp, ...commandGroups.project].slice(0, 8).map((command) => (
+              <button key={`${command.source || "command"}:${command.name}`} onClick={() => { setAgentPrompt(`/${command.name}`); setMcpMenuOpen(false); }}>
+                <span>/{command.name}</span>
+                <small>{command.source || "command"}</small>
+              </button>
+            ))}
+            {!agentCommands.length ? <p>No project commands discovered.</p> : null}
           </div>
         ) : null}
         {skillsOpen ? (
@@ -3242,15 +4528,20 @@ function AgentPanel({
       </div>
 
       <div className="agent-activity-rail">
+        {sessionContext ? (
+          <span className="agent-activity-chip info" title={sessionContext.summaryText}>
+            {sessionContext.messageCount} ctx
+          </span>
+        ) : null}
         {todos.length ? (
-          <span className="agent-activity-chip todo" title={todos.map((todo) => `${todo.status}: ${todo.text}`).join("\n")}>
+          <span className="agent-activity-chip todo" title={todos.map((todo) => `${uiText(todo.status, "pending")}: ${todoText(todo)}`).join("\n")}>
             <ListTodo size={13} />
-            {todos.filter((todo) => todo.status !== "done").length}/{todos.length} todos
+            {openTodoCount}/{todos.length} todos
           </span>
         ) : null}
         {visibleActivityChips.map((chip) => (
-          <span key={chip.id} className={`agent-activity-chip ${chip.tone || "info"}`} title={chip.detail || chip.sessionID || chip.label}>
-            {chip.label}
+          <span key={uiText(chip.id, "activity")} className={`agent-activity-chip ${chip.tone || "info"}`} title={uiText(chip.detail || chip.sessionID || chip.label)}>
+            {uiText(chip.label, "activity")}
             {chip.count && chip.count > 1 ? <b>x{chip.count}</b> : null}
           </span>
         ))}
@@ -3258,52 +4549,76 @@ function AgentPanel({
       </div>
 
       <div className="agent-chat-scroll">
-        {agentMessages.map((message) => (
-          <article key={message.id} className={`agent-message ${message.role}`}>
+        {todos.length ? (
+          <TodoListPanel
+            className="agent-todo-list"
+            todos={todos}
+            title="Plan"
+            emptyLabel="No active plan yet."
+          />
+        ) : null}
+        {agentMessages.map((message, messageIndex) => {
+          const messageText = uiText(message.text, "", 24000);
+          const messageTools = Array.isArray(message.tools) ? message.tools : [];
+          const messagePermissions = Array.isArray(message.permissions) ? message.permissions : [];
+          const messageDiff = Array.isArray(message.diff) ? message.diff : [];
+          return (
+          <article key={uiText(message.id, `message-${messageIndex}`)} className={`agent-message ${message.role}`}>
             <div className="agent-message-meta">
               <span>{message.role === "user" ? "You" : message.role === "assistant" ? "Code" : "System"}</span>
-              {message.status ? <small>{message.status}</small> : message.meta ? <small>{message.meta}</small> : null}
+              {message.status ? <small>{uiText(message.status)}</small> : message.meta ? <small>{uiText(message.meta)}</small> : null}
             </div>
-            <div className="agent-message-body">{message.text}</div>
-            {message.role === "assistant" && message.pending ? <ActivityChipRow chips={[{ id: `${message.id}-pending`, label: "running", tone: "info" }]} /> : null}
-            {message.tools?.length ? (
+            {messageText ? <div className="agent-message-body">{messageText}</div> : null}
+            {message.role === "assistant" && message.pending ? <ActivityChipRow chips={[{ id: `${uiText(message.id, `message-${messageIndex}`)}-pending`, label: "running", tone: "info" }]} /> : null}
+            {messageTools.length ? (
               <div className="agent-tool-list">
-                {message.tools.map((tool, index) => (
-                  <ToolActivityCard key={uiText(tool.id, `tool-${index}`)} tool={tool} />
+                {messageTools.map((tool, index) => (
+                  <AgentToolActivityCard className="agent-tool-card" key={uiText(tool.id, `tool-${index}`)} tool={tool} />
                 ))}
               </div>
             ) : null}
-            {message.permissions?.length ? (
+            {messagePermissions.length ? (
               <div className="agent-permission-list">
-                {message.permissions.map((permission) => (
-                  <PermissionRequestCard
-                    key={permissionKey(permission)}
+                {messagePermissions.map((permission) => (
+                  <AgentPermissionRequestCard
+                    className="agent-permission-card"
+                    key={permissionRequestKey(permission)}
                     permission={permission}
                     onReply={(reply) => onPermissionReply(message.sessionID || activeSessionId, permission, reply)}
                   />
                 ))}
               </div>
             ) : null}
-            {message.diff?.length ? (
+            {messageDiff.length ? (
               <div className="agent-diff-list">
                 <div className="agent-diff-header">
                   <strong>File changes</strong>
+                  {patchFromDiffFiles(messageDiff).trim() ? <button onClick={() => onApplyPatch(messageDiff)}>Apply patch</button> : null}
                   <button onClick={() => onRevert(message.sessionID, message.messageID)}>Revert turn</button>
                   <button onClick={() => onForkSession(message.sessionID, message.messageID)}>Fork here</button>
                 </div>
-                {message.diff.map((file, index) => (
-                  <DiffChangeCard key={`${file.file || file.path || "file"}-${index}`} file={file} />
+                {messageDiff.map((file, index) => (
+                  <AgentDiffChangeCard
+                    className="agent-diff-card"
+                    key={`${file.file || file.path || "file"}-${index}`}
+                    file={file}
+                    defaultOpen={index === 0}
+                    onOpen={onOpenDiffFile}
+                    onRevert={() => onRevert(message.sessionID, message.messageID)}
+                    onFork={() => onForkSession(message.sessionID, message.messageID)}
+                  />
                 ))}
               </div>
             ) : null}
             {message.command ? (
               <details className="agent-tool-details">
                 <summary>Engine command {typeof message.exitCode === "number" ? `- exit ${message.exitCode}` : ""}</summary>
-                <code>{message.command}</code>
+                <code>{uiText(message.command, "", 40000)}</code>
               </details>
             ) : null}
           </article>
-        ))}
+          );
+        })}
         {agentBusy ? (
           <article className="agent-message assistant loading">
             <div className="agent-message-meta"><span>Code</span><small>working</small></div>
@@ -3335,17 +4650,27 @@ function AgentPanel({
               <div className="composer-context-chips">
                 <span>{contextMode}</span>
                 <span>{activePath ? displayFileName(activePath) : "No file"}</span>
-                {activeSessionId ? <span>Session</span> : null}
+                {activeSessionId ? <span>{sessionContext ? `${sessionContext.messageCount} msgs` : "Session"}</span> : null}
+                {sessionContext?.diffCount ? <span>{sessionContext.diffCount} diffs</span> : null}
+                {sessionContext?.todoCount ? <span>{sessionContext.todoCount} todos</span> : null}
                 {planMode ? <span>Plan</span> : null}
               </div>
             </div>
           <textarea
+            ref={composerInputRef}
             value={agentPrompt}
             onChange={(event) => setAgentPrompt(event.target.value)}
             onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                setPlusMenuOpen(false);
+                setAccessMenuOpen(false);
+                setModelMenuOpen(false);
+                setAgentMenuOpen(false);
+                return;
+              }
               if (event.key === "Enter" && !event.shiftKey) {
                 event.preventDefault();
-                onSubmitPrompt({ permissionMode, planMode });
+                if (!agentBusy) onSubmitPrompt({ permissionMode, planMode });
               }
             }}
             placeholder="Ask Code to review, explain, refactor, or plan an edit..."
@@ -3394,14 +4719,17 @@ function AgentPanel({
             <div className="composer-control-wrap access-wrap">
               <button className="permission-button" title="Agent permission level" onClick={() => openMenu("access")}>
                 <ShieldCheck size={14} />
-                <span>Permissions</span>
+                <span>{permissionLabel}</span>
                 <ChevronDown size={13} />
               </button>
               {accessMenuOpen ? (
                 <div className="composer-popover permission-editor">
                   <div className="permission-editor-header">
-                    <strong>Granular tool permissions</strong>
-                    <small>{Object.values(granularPermissions).filter(v => v === "ask").length} ask, {Object.values(granularPermissions).filter(v => v === "allow").length} allow</small>
+                    <strong>Agent permissions</strong>
+                    <small>
+                      {permissionCounts.allow} allow · {permissionCounts.ask} ask · {permissionCounts.deny} deny
+                      {customPermissionRules.length ? ` · ${customPermissionRules.length} pattern` : ""}
+                    </small>
                   </div>
                   <div className="permission-tool-list">
                     {TOOL_PERMISSION_GROUPS.map((group) => (
@@ -3431,6 +4759,78 @@ function AgentPanel({
                       </div>
                     ))}
                   </div>
+                  <div className="permission-rule-section">
+                    <div className="permission-rule-header">
+                      <div>
+                        <strong>Pattern rules</strong>
+                        <small>{customRuleCounts.allow} allow · {customRuleCounts.ask} ask · {customRuleCounts.deny} deny</small>
+                      </div>
+                      <div className="permission-rule-actions">
+                        <button type="button" onClick={() => setCustomPermissionRules(safePermissionPreset())}>Safe preset</button>
+                        <button type="button" onClick={addPermissionRule}>Add</button>
+                      </div>
+                    </div>
+                    {customPermissionRules.length ? (
+                      <div className="permission-rule-list">
+                        {customPermissionRules.map((rule) => (
+                          <div key={rule.id} className="permission-rule-row">
+                            <select
+                              aria-label="Permission"
+                              value={rule.permission}
+                              onChange={(event) => updatePermissionRule(rule.id, { permission: event.target.value })}
+                            >
+                              {TOOL_PERMISSIONS.map((tool) => (
+                                <option key={tool.id} value={tool.id}>{tool.id}</option>
+                              ))}
+                              {!TOOL_PERMISSIONS.some((tool) => tool.id === rule.permission) && rule.permission !== "*" ? (
+                                <option value={rule.permission}>{rule.permission}</option>
+                              ) : null}
+                              <option value="*">*</option>
+                            </select>
+                            <input
+                              aria-label="Pattern"
+                              value={rule.pattern}
+                              onChange={(event) => updatePermissionRule(rule.id, { pattern: event.target.value })}
+                              placeholder="pattern, e.g. git *"
+                            />
+                            <select
+                              aria-label="Action"
+                              value={rule.action}
+                              onChange={(event) => updatePermissionRule(rule.id, { action: event.target.value as PermissionEffect })}
+                            >
+                              <option value="allow">allow</option>
+                              <option value="ask">ask</option>
+                              <option value="deny">deny</option>
+                            </select>
+                            <button
+                              type="button"
+                              className="icon-button tiny danger"
+                              title="Remove rule"
+                              onClick={() => removePermissionRule(rule.id)}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                            <input
+                              className="permission-rule-description"
+                              aria-label="Description"
+                              value={rule.description || ""}
+                              onChange={(event) => updatePermissionRule(rule.id, { description: event.target.value })}
+                              placeholder="Optional note"
+                            />
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="permission-rule-empty">
+                        Add a pattern override like <code>bash</code> + <code>rm *</code> + <code>deny</code>.
+                      </div>
+                    )}
+                    {customPermissionRules.length ? (
+                      <button className="permission-rule-clear" type="button" onClick={() => setCustomPermissionRules([])}>
+                        Clear pattern rules
+                      </button>
+                    ) : null}
+                  </div>
                   {savedPermissions.length > 0 ? (
                     <div className="saved-permissions-section">
                       <div className="saved-permissions-header">
@@ -3438,22 +4838,28 @@ function AgentPanel({
                         <small>{savedPermissions.length}</small>
                       </div>
                       <div className="saved-permissions-list">
-                        {savedPermissions.map((sp) => (
-                          <div key={sp.id} className="saved-permission-row">
-                            <div className="saved-permission-info">
-                              <span className="saved-permission-action">{sp.rule.action || "any"}</span>
-                              <span className={`saved-permission-effect ${sp.rule.effect}`}>{sp.rule.effect}</span>
-                              {sp.rule.description ? <small>{sp.rule.description}</small> : null}
+                        {savedPermissions.map((sp, index) => {
+                          const rule = asRecord(sp.rule) || {};
+                          const effect = uiText(rule.effect, "allow");
+                          const effectClass = effect.toLowerCase().replace(/[^a-z0-9_-]/g, "-") || "allow";
+                          const savedId = uiText(sp.id, `saved-permission-${index}`);
+                          return (
+                            <div key={savedId} className="saved-permission-row">
+                              <div className="saved-permission-info">
+                                <span className="saved-permission-action">{uiText(rule.action || rule.permission || rule.resource, "any")}</span>
+                                <span className={`saved-permission-effect ${effectClass}`}>{effect}</span>
+                                {rule.description ? <small>{uiText(rule.description)}</small> : null}
+                              </div>
+                              <button
+                                className="icon-button tiny danger"
+                                title="Revoke"
+                                onClick={() => onRevokeSavedPermission(savedId)}
+                              >
+                                <Trash2 size={12} />
+                              </button>
                             </div>
-                            <button
-                              className="icon-button tiny danger"
-                              title="Revoke"
-                              onClick={() => onRevokeSavedPermission(sp.id)}
-                            >
-                              <Trash2 size={12} />
-                            </button>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   ) : null}
@@ -3467,11 +4873,15 @@ function AgentPanel({
               </button>
               {modelMenuOpen ? (
                 <div className="composer-popover model-menu">
-                  {modelOptions.length ? modelOptions.map((model) => (
+                  {modelOptions.length ? modelOptions.map((model) => {
+                    const parts = modelParts(model);
+                    return (
                     <button key={model} className={selectedModel === model ? "selected" : ""} onClick={() => { setSelectedModel(model); setModelMenuOpen(false); }}>
-                      <strong>{model.replace(/^ollama\//, "")}</strong>
+                      <strong>{parts.name}</strong>
+                      <small>{parts.provider}</small>
                     </button>
-                  )) : (
+                    );
+                  }) : (
                     <button disabled><strong>{ollamaOnline ? "No Ollama models" : "Ollama offline"}</strong></button>
                   )}
                 </div>
@@ -3500,7 +4910,12 @@ function AgentPanel({
               ) : null}
             </div>
             <button className="composer-tool" onClick={onCopyPrompt}><Copy size={15} /></button>
-            <button className="composer-send" disabled={!agentPrompt.trim() || agentBusy} onClick={() => onSubmitPrompt({ permissionMode, planMode })}>
+            <button
+              className="composer-send"
+              disabled={!agentPrompt.trim() && !agentBusy}
+              title={agentBusy ? "Stop Code" : "Send to Code"}
+              onClick={() => agentBusy ? onStop() : onSubmitPrompt({ permissionMode, planMode })}
+            >
               {agentBusy ? <X size={17} /> : <Send size={17} />}
             </button>
           </div>
@@ -3753,6 +5168,8 @@ function TerminalPanel({
   setActivePanel,
   outputLog,
   agentLog,
+  diagnostics,
+  onRefreshDiagnostics,
   onClose
 }: {
   workspacePath: string;
@@ -3763,12 +5180,72 @@ function TerminalPanel({
   setActivePanel: (panel: BottomPanel) => void;
   outputLog: string[];
   agentLog: string[];
+  diagnostics: DiagnosticsSnapshot;
+  onRefreshDiagnostics: () => void;
   onClose: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const idRef = useRef("");
+  const pendingWriteRef = useRef("");
+  const [terminalGeneration, setTerminalGeneration] = useState(0);
+  const [enginePtys, setEnginePtys] = useState<unknown[]>([]);
+  const [enginePtyNotice, setEnginePtyNotice] = useState("");
+
+  const enginePtyId = (pty: unknown, fallback = "") => {
+    const record = asRecord(pty) || {};
+    return uiText(record.ptyID || record.id || record.name, fallback);
+  };
+
+  const enginePtyTitle = (pty: unknown, fallback = "Engine PTY") => {
+    const record = asRecord(pty) || {};
+    return uiText(record.title || record.name || record.command || record.shell || record.ptyID || record.id, fallback);
+  };
+
+  const refreshEnginePtys = async () => {
+    if (!workspacePath) return;
+    try {
+      const result = await api.opencode.ptyList({ projectPath: workspacePath });
+      const ptys = Array.isArray(result.ptys) ? result.ptys : Array.isArray(result.terminals) ? result.terminals : [];
+      setEnginePtys(ptys);
+      setEnginePtyNotice(result.ok === false ? result.error || "Engine PTY list failed." : `${ptys.length} engine ${ptys.length === 1 ? "PTY" : "PTYs"}`);
+    } catch (error) {
+      setEnginePtys([]);
+      setEnginePtyNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const createEnginePty = async () => {
+    if (!workspacePath) return;
+    const title = window.prompt("Engine terminal title", "Code shell") || "Code shell";
+    try {
+      const result = await api.opencode.ptyCreate({
+        projectPath: workspacePath,
+        title,
+        cwd: workspacePath,
+        size: { columns: terminalRef.current?.cols || 80, rows: terminalRef.current?.rows || 24 }
+      });
+      if (result.ok === false) throw new Error(result.error || "Engine PTY create failed.");
+      setEnginePtyNotice(`${title} created.`);
+      await refreshEnginePtys();
+    } catch (error) {
+      setEnginePtyNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const deleteEnginePty = async (pty: unknown) => {
+    const ptyID = enginePtyId(pty);
+    if (!workspacePath || !ptyID) return;
+    try {
+      const result = await api.opencode.ptyDelete({ projectPath: workspacePath, ptyID });
+      if (result.ok === false) throw new Error(result.error || "Engine PTY delete failed.");
+      setEnginePtyNotice(`${enginePtyTitle(pty, ptyID)} closed.`);
+      await refreshEnginePtys();
+    } catch (error) {
+      setEnginePtyNotice(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -3790,11 +5267,19 @@ function TerminalPanel({
     terminalRef.current = term;
     fitRef.current = fit;
     fit.fit();
+    term.focus();
     term.writeln(workspacePath ? `Terminal: ${workspacePath}` : "Terminal ready.");
-    api.terminal.start(workspacePath).then(({ id }) => {
+    api.terminal.start(workspacePath).then(({ id, mode }) => {
       idRef.current = id;
       fit.fit();
       api.terminal.resize(id, term.cols, term.rows);
+      if (pendingWriteRef.current) {
+        api.terminal.write(id, pendingWriteRef.current);
+        pendingWriteRef.current = "";
+      }
+      if (mode !== "pty") term.writeln("\r\nTerminal backend is unavailable in this environment.");
+    }).catch((error) => {
+      term.writeln(`\r\nTerminal failed to start: ${error instanceof Error ? error.message : String(error)}`);
     });
     const dataDispose = api.terminal.onData((id, data) => {
       if (id !== idRef.current) return;
@@ -3811,8 +5296,13 @@ function TerminalPanel({
       fit.fit();
       if (idRef.current) api.terminal.resize(idRef.current, term.cols, term.rows);
     };
+    const observer = typeof ResizeObserver !== "undefined" && hostRef.current
+      ? new ResizeObserver(resize)
+      : null;
+    if (observer && hostRef.current) observer.observe(hostRef.current);
     window.addEventListener("resize", resize);
     return () => {
+      observer?.disconnect();
       window.removeEventListener("resize", resize);
       inputDispose.dispose();
       dataDispose();
@@ -3821,12 +5311,16 @@ function TerminalPanel({
       term.dispose();
       setTerminalOutput("");
     };
-  }, [workspacePath, setTerminalOutput]);
+  }, [workspacePath, setTerminalOutput, terminalGeneration]);
 
   useEffect(() => {
     if (!commandEvent || !terminalRef.current) return;
     if (commandEvent.execute) {
-      if (idRef.current) api.terminal.write(idRef.current, commandEvent.text);
+      if (idRef.current) {
+        api.terminal.write(idRef.current, commandEvent.text);
+      } else {
+        pendingWriteRef.current += commandEvent.text;
+      }
     } else {
       terminalRef.current.write(commandEvent.text);
     }
@@ -3834,7 +5328,13 @@ function TerminalPanel({
   }, [commandEvent]);
 
   useEffect(() => {
-    if (activePanel === "terminal") window.setTimeout(() => fitRef.current?.fit(), 40);
+    if (activePanel === "terminal") {
+      window.setTimeout(() => {
+        fitRef.current?.fit();
+        terminalRef.current?.focus();
+      }, 40);
+      refreshEnginePtys();
+    }
   }, [activePanel]);
 
   return (
@@ -3848,10 +5348,32 @@ function TerminalPanel({
           ))}
         </div>
         <small>{terminalOutput ? "output captured" : "ready"}</small>
+        <button className="icon-button tiny" title="Refresh Engine PTYs" onClick={refreshEnginePtys}><MonitorPlay size={14} /></button>
+        <button className="icon-button tiny" title="Restart Terminal" onClick={() => setTerminalGeneration((value) => value + 1)}><RefreshCw size={14} /></button>
         <button className="icon-button tiny" title="Close Panel" onClick={onClose}><PanelBottomClose size={15} /></button>
       </div>
+      {activePanel === "terminal" ? (
+        <div className="terminal-engine-pty-strip">
+          <span>Engine PTY</span>
+          <small>{enginePtyNotice || `${enginePtys.length} sessions`}</small>
+          <button onClick={createEnginePty}>New</button>
+          {enginePtys.slice(0, 3).map((pty, index) => (
+            <button key={enginePtyId(pty, `pty-${index}`)} onClick={() => deleteEnginePty(pty)}>
+              Close {enginePtyTitle(pty, `PTY ${index + 1}`)}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div className={`terminal-host ${activePanel === "terminal" ? "active" : "hidden-panel"}`} ref={hostRef} />
-      {activePanel !== "terminal" ? <BottomPanelContent activePanel={activePanel} outputLog={outputLog} agentLog={agentLog} /> : null}
+      {activePanel !== "terminal" ? (
+        <BottomPanelContent
+          activePanel={activePanel}
+          outputLog={outputLog}
+          agentLog={agentLog}
+          diagnostics={diagnostics}
+          onRefreshDiagnostics={onRefreshDiagnostics}
+        />
+      ) : null}
     </section>
   );
 }
@@ -3866,9 +5388,41 @@ function bottomPanelLabel(panel: BottomPanel) {
   }[panel];
 }
 
-function BottomPanelContent({ activePanel, outputLog, agentLog }: { activePanel: BottomPanel; outputLog: string[]; agentLog: string[] }) {
+function BottomPanelContent({
+  activePanel,
+  outputLog,
+  agentLog,
+  diagnostics,
+  onRefreshDiagnostics
+}: {
+  activePanel: BottomPanel;
+  outputLog: string[];
+  agentLog: string[];
+  diagnostics: DiagnosticsSnapshot;
+  onRefreshDiagnostics: () => void;
+}) {
   if (activePanel === "problems") {
-    return <div className="panel-empty"><CirclePlay size={20} /><strong>No problems detected</strong><span>Diagnostics from language services and build tasks will appear here.</span></div>;
+    const rows = [
+      { name: "Formatter", result: diagnostics.formatter },
+      { name: "LSP", result: diagnostics.lsp }
+    ];
+    return (
+      <div className="diagnostics-panel">
+        <header>
+          <strong>Code diagnostics</strong>
+          <small>{diagnostics.loading ? "refreshing" : diagnostics.updatedAt ? `updated ${diagnostics.updatedAt}` : "not refreshed"}</small>
+          <button onClick={onRefreshDiagnostics}>Refresh</button>
+        </header>
+        {diagnostics.error ? <p className="diagnostics-error">{diagnostics.error}</p> : null}
+        {rows.map(({ name, result }) => (
+          <article key={name} className={result?.ok === false ? "error" : result ? "ok" : ""}>
+            <span>{name}</span>
+            <strong>{result ? result.ok === false ? "Unavailable" : "Available" : "Unknown"}</strong>
+            <small>{result ? uiText(result.error || result.source || result.formatter || result.lsp || result.raw || result.result, "engine") : "Run refresh to query the engine."}</small>
+          </article>
+        ))}
+      </div>
+    );
   }
   if (activePanel === "output") {
     return <pre className="output-view">{outputLog.length ? outputLog.join("\n") : "No output yet. Run Code, Git, or a task to capture output here."}</pre>;

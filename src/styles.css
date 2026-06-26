@@ -1173,7 +1173,7 @@ button:disabled {
 }
 
 .welcome-actions button:hover,
-.welcome-recent div:hover {
+.welcome-recent button:hover {
   color: #7dbaff;
 }
 
@@ -1185,12 +1185,31 @@ button:disabled {
   font-weight: 400;
 }
 
-.welcome-recent div {
+.welcome-recent button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 18px;
+  width: 100%;
+  border: 0;
+  background: transparent;
   color: #4ea1ff;
-  cursor: default;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.welcome-recent button span,
+.welcome-recent button small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.welcome-recent p {
+  margin: 0;
+  color: #8b94bc;
+  font-size: 13px;
 }
 
 .welcome-recent small {
@@ -9999,4 +10018,1950 @@ body,
 /* Activity bar permissions button */
 .activity-button.permissions-button {
   margin-bottom: 2px;
+}
+
+/* Step 5 polish: dense Codex-style agent surface. Keep this near EOF so it owns the cascade. */
+.opencode-agent {
+  --agent-polish-bg: #20222d;
+  --agent-polish-surface: #2a2d3a;
+  --agent-polish-surface-2: #242733;
+  --agent-polish-raised: #303341;
+  --agent-polish-border: rgba(137, 147, 205, 0.18);
+  --agent-polish-border-strong: rgba(101, 209, 195, 0.28);
+  --agent-polish-muted: #9aa5d0;
+  --agent-polish-text: #eef2ff;
+  --agent-polish-cyan: #65d1c3;
+  --agent-polish-yellow: #f1c84b;
+  --agent-polish-red: #f27676;
+}
+
+.opencode-agent .agent-chat-header,
+.opencode-agent .agent-thread-toolbar,
+.opencode-agent .agent-capability-strip,
+.opencode-agent .agent-activity-rail {
+  border-color: rgba(137, 147, 205, 0.1);
+}
+
+.opencode-agent .agent-chat-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 12px;
+  padding: 12px 16px 14px !important;
+  scrollbar-color: rgba(137, 147, 205, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.opencode-agent .agent-chat-scroll::-webkit-scrollbar,
+.opencode-agent .agent-diff-preview::-webkit-scrollbar,
+.opencode-agent .agent-tool-card pre::-webkit-scrollbar,
+.opencode-agent .composer-popover::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.opencode-agent .agent-chat-scroll::-webkit-scrollbar-thumb,
+.opencode-agent .agent-diff-preview::-webkit-scrollbar-thumb,
+.opencode-agent .agent-tool-card pre::-webkit-scrollbar-thumb,
+.opencode-agent .composer-popover::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(137, 147, 205, 0.42);
+  background-clip: padding-box;
+}
+
+.opencode-agent .agent-provider-popover > div:first-child {
+  grid-template-columns: 1fr auto;
+  align-items: start;
+}
+
+.opencode-agent .agent-provider-popover > div:first-child strong,
+.opencode-agent .agent-provider-popover > div:first-child small {
+  grid-column: 1;
+}
+
+.opencode-agent .agent-provider-popover > div:first-child small {
+  color: var(--right-panel-muted);
+  font-size: 10px;
+  line-height: 1.25;
+}
+
+.opencode-agent .agent-provider-popover > div:first-child button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+
+.opencode-agent .agent-provider-row {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  border-color: rgba(137, 147, 205, 0.16);
+  background: rgba(21, 24, 34, 0.78);
+}
+
+.opencode-agent .agent-provider-stack {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.opencode-agent .agent-provider-row span {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 1px;
+  align-items: center;
+}
+
+.opencode-agent .agent-provider-row span i {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #8993cd;
+  box-shadow: 0 0 8px rgba(137, 147, 205, 0.45);
+}
+
+.opencode-agent .agent-provider-row.connected span i,
+.opencode-agent .agent-provider-row.credential span i {
+  background: #65d1c3;
+  box-shadow: 0 0 9px rgba(101, 209, 195, 0.65);
+}
+
+.opencode-agent .agent-provider-row.needs-auth span i {
+  background: #f1c84b;
+  box-shadow: 0 0 9px rgba(241, 200, 75, 0.56);
+}
+
+.opencode-agent .agent-provider-row span strong,
+.opencode-agent .agent-provider-row span em {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .agent-provider-row span strong {
+  color: #f3f6ff;
+  font-size: 12px;
+}
+
+.opencode-agent .agent-provider-row span em {
+  color: var(--right-panel-muted);
+  font-size: 10px;
+  font-style: normal;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.opencode-agent .agent-provider-credential-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: 14px;
+  padding: 6px 7px;
+  border: 1px solid rgba(101, 209, 195, 0.12);
+  border-radius: 7px;
+  background: rgba(101, 209, 195, 0.045);
+}
+
+.opencode-agent .agent-provider-credential-row span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.opencode-agent .agent-provider-credential-row strong,
+.opencode-agent .agent-provider-credential-row em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .agent-provider-credential-row strong {
+  color: #eef2ff;
+  font-size: 11px;
+}
+
+.opencode-agent .agent-provider-credential-row em {
+  color: var(--right-panel-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.opencode-agent .agent-provider-credential-row button {
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid rgba(242, 118, 118, 0.25);
+  border-radius: 6px;
+  background: rgba(242, 118, 118, 0.07);
+  color: #ffc5c5;
+  font-size: 10px;
+}
+
+.opencode-agent .agent-tool-activity-card__meta--error {
+  border-color: rgba(242, 118, 118, 0.24);
+  background: rgba(242, 118, 118, 0.06);
+}
+
+.opencode-agent .agent-tool-activity-card__meta-grid {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid rgba(137, 147, 205, 0.12);
+  background: rgba(12, 15, 22, 0.22);
+}
+
+.opencode-agent .agent-tool-activity-card__meta {
+  display: grid;
+  grid-template-columns: minmax(70px, 0.28fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid rgba(137, 147, 205, 0.12);
+  border-radius: 7px;
+  background: rgba(28, 32, 43, 0.52);
+}
+
+.opencode-agent .agent-tool-activity-card__meta-label {
+  color: var(--agent-polish-cyan);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.opencode-agent .agent-tool-activity-card__meta-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #dbe3ff;
+  font: 10px/1.35 Consolas, "Courier New", monospace;
+}
+
+.opencode-agent .agent-tool-activity-card__meta--error .agent-tool-activity-card__meta-label,
+.opencode-agent .agent-tool-activity-card__meta--error .agent-tool-activity-card__meta-value {
+  color: #ffc5c5;
+}
+
+.opencode-agent .agent-tool-activity-card__input summary {
+  min-height: 26px;
+  padding: 6px 10px;
+  border-top: 1px solid rgba(137, 147, 205, 0.12);
+  color: var(--agent-polish-cyan);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.opencode-agent .agent-mcp-assets {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 6px 2px;
+  border-top: 1px solid rgba(137, 147, 205, 0.12);
+  color: #f3f6ff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.opencode-agent .agent-mcp-assets small {
+  color: var(--right-panel-muted);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.opencode-agent .agent-permission-request-card__kind {
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--right-panel-cyan);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.opencode-agent .agent-message {
+  gap: 5px;
+}
+
+.opencode-agent .agent-message + .agent-message {
+  margin-top: 2px;
+}
+
+.opencode-agent .agent-message-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: min(100%, 520px);
+  min-height: 16px;
+  font-size: 11px;
+}
+
+.opencode-agent .agent-message-body {
+  max-width: min(100%, 520px);
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--agent-polish-surface-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.opencode-agent .agent-message.assistant .agent-message-body,
+.opencode-agent .agent-message.system .agent-message-body {
+  border-color: rgba(137, 147, 205, 0.1);
+}
+
+.opencode-agent .agent-message.user .agent-message-body {
+  border-color: rgba(101, 209, 195, 0.22);
+  background: #26313a;
+}
+
+.opencode-agent .agent-inline-activity {
+  max-width: min(100%, 520px);
+}
+
+.opencode-agent .agent-tool-list,
+.opencode-agent .agent-diff-list,
+.opencode-agent .agent-permission-list,
+.opencode-agent .agent-todo-list,
+.opencode-agent .agent-runtime-feed,
+.opencode-agent .agent-tool-details {
+  display: grid;
+  justify-self: start;
+  gap: 7px;
+  width: min(100%, 520px);
+  min-width: 0;
+  margin-top: 4px;
+}
+
+.opencode-agent .agent-message.user .agent-tool-list,
+.opencode-agent .agent-message.user .agent-diff-list,
+.opencode-agent .agent-message.user .agent-permission-list,
+.opencode-agent .agent-message.user .agent-todo-list,
+.opencode-agent .agent-message.user .agent-runtime-feed {
+  justify-self: end;
+}
+
+.opencode-agent .agent-tool-card,
+.opencode-agent .agent-diff-card,
+.opencode-agent .agent-permission-card,
+.opencode-agent .agent-question-card,
+.opencode-agent .agent-todo-list,
+.opencode-agent .agent-runtime-feed,
+.opencode-agent .agent-tool-details {
+  overflow: hidden;
+  border: 1px solid var(--agent-polish-border);
+  border-radius: 8px;
+  background: rgba(18, 22, 30, 0.62);
+  color: #d8def8;
+}
+
+.opencode-agent .agent-tool-card[open],
+.opencode-agent .agent-diff-card[open],
+.opencode-agent .agent-tool-details[open] {
+  border-color: var(--agent-polish-border-strong);
+  background: rgba(18, 23, 31, 0.82);
+}
+
+.opencode-agent .agent-tool-card summary,
+.opencode-agent .agent-diff-card summary,
+.opencode-agent .agent-tool-details summary {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.opencode-agent .agent-tool-card summary span,
+.opencode-agent .agent-diff-card summary span {
+  color: var(--agent-polish-cyan);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.opencode-agent .agent-tool-card summary strong,
+.opencode-agent .agent-diff-card summary strong {
+  font-size: 12px;
+}
+
+.opencode-agent .agent-tool-card summary em,
+.opencode-agent .agent-diff-card summary em {
+  color: var(--agent-polish-yellow);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.opencode-agent .agent-tool-card pre,
+.opencode-agent .agent-tool-details code,
+.opencode-agent .agent-diff-card > small,
+.opencode-agent .agent-tool-card > small {
+  max-height: 220px;
+  margin: 0;
+  padding: 9px 10px;
+  border-top: 1px solid rgba(137, 147, 205, 0.12);
+  background: rgba(12, 15, 21, 0.42);
+  color: #cbd2ef;
+  font: 11px/1.45 Consolas, "Courier New", monospace;
+}
+
+.opencode-agent .agent-diff-header {
+  min-height: 30px;
+  padding: 0 2px;
+}
+
+.opencode-agent .agent-diff-header strong {
+  font-size: 12px;
+}
+
+.opencode-agent .agent-diff-preview {
+  max-height: 280px;
+  border-top: 1px solid rgba(137, 147, 205, 0.12);
+  background: #151820;
+}
+
+.opencode-agent .agent-diff-preview code {
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 7px;
+  padding: 1px 8px;
+  font-size: 11px;
+  line-height: 1.48;
+}
+
+.opencode-agent .agent-permission-card,
+.opencode-agent .agent-question-card {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+}
+
+.opencode-agent .agent-permission-card strong,
+.opencode-agent .agent-question-card strong {
+  color: var(--agent-polish-yellow);
+  font-size: 12px;
+}
+
+.opencode-agent .agent-permission-card span,
+.opencode-agent .agent-permission-card small,
+.opencode-agent .agent-question-card p,
+.opencode-agent .agent-question-card small {
+  margin: 0;
+  color: var(--agent-polish-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.opencode-agent .agent-permission-card > div,
+.opencode-agent .question-actions,
+.opencode-agent .question-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.opencode-agent .agent-diff-header button,
+.opencode-agent .agent-permission-card button,
+.opencode-agent .agent-question-card button {
+  min-height: 27px;
+  padding: 0 9px;
+  border: 1px solid rgba(101, 209, 195, 0.26);
+  border-radius: 6px;
+  background: rgba(101, 209, 195, 0.08);
+  color: #c7fff7;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.opencode-agent .agent-permission-card button:last-child,
+.opencode-agent .agent-question-card .reject-button {
+  border-color: rgba(242, 118, 118, 0.32);
+  background: rgba(242, 118, 118, 0.09);
+  color: #ffd1d1;
+}
+
+.opencode-agent .agent-todo-list,
+.opencode-agent .agent-runtime-feed {
+  gap: 0;
+  padding: 4px;
+}
+
+.opencode-agent .agent-todo-list > *,
+.opencode-agent .agent-runtime-feed > * {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  color: var(--agent-polish-muted);
+  font-size: 12px;
+}
+
+.opencode-agent .agent-todo-list > * + *,
+.opencode-agent .agent-runtime-feed > * + * {
+  border-top: 1px solid rgba(137, 147, 205, 0.08);
+}
+
+.opencode-agent .agent-todo-list strong,
+.opencode-agent .agent-runtime-feed strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--agent-polish-text);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .agent-composer-shell {
+  margin-top: auto;
+  padding: 8px 14px 12px !important;
+  border-top: 1px solid rgba(137, 147, 205, 0.1);
+  background:
+    linear-gradient(180deg, rgba(32, 34, 45, 0.88), var(--agent-polish-bg) 18px),
+    var(--agent-polish-bg);
+}
+
+.opencode-agent .agent-composer-card {
+  border-radius: 10px;
+  background: var(--agent-polish-raised);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.opencode-agent .composer-context-line {
+  align-items: center;
+  min-height: 31px;
+  padding: 8px 10px 0;
+}
+
+.opencode-agent .composer-project-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.opencode-agent .composer-context-chips {
+  align-items: center;
+  max-width: 50%;
+}
+
+.opencode-agent .composer-context-chips span {
+  max-width: 96px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 20px;
+}
+
+.opencode-agent .agent-composer-card > textarea,
+.opencode-agent .agent-composer-card > textarea:focus,
+.opencode-agent .agent-composer-card > textarea:focus-visible {
+  min-height: 58px;
+  max-height: 124px;
+  padding: 7px 10px 5px;
+}
+
+.opencode-agent .agent-composer-footer {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 5px 7px 8px;
+}
+
+.opencode-agent .composer-control-wrap {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.opencode-agent .access-wrap {
+  flex: 1 1 94px;
+  min-width: 74px;
+}
+
+.opencode-agent .model-wrap {
+  flex: 0.85 1 82px;
+  min-width: 60px;
+}
+
+.opencode-agent .agent-wrap {
+  flex: 0.9 1 92px;
+  min-width: 68px;
+}
+
+.opencode-agent .composer-icon-button,
+.opencode-agent .composer-tool {
+  flex: 0 0 32px;
+}
+
+.opencode-agent .composer-send {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+}
+
+.opencode-agent .permission-button,
+.opencode-agent .model-button,
+.opencode-agent .composer-icon-button,
+.opencode-agent .composer-tool {
+  height: 31px;
+  border-radius: 7px;
+}
+
+.opencode-agent .permission-button,
+.opencode-agent .model-button {
+  gap: 5px;
+  padding: 0 7px;
+}
+
+.opencode-agent .permission-button span,
+.opencode-agent .model-button span {
+  min-width: 0;
+  font-size: 11px;
+}
+
+.opencode-agent .permission-button svg,
+.opencode-agent .model-button svg {
+  flex: 0 0 auto;
+}
+
+.opencode-agent .composer-popover,
+.opencode-agent .slash-command-menu {
+  border-radius: 8px;
+  background: #282b38;
+}
+
+.opencode-agent .composer-popover {
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(360px, calc(100vh - 160px));
+  padding: 6px;
+}
+
+.opencode-agent .plus-menu {
+  left: 0;
+}
+
+.opencode-agent .model-menu,
+.opencode-agent .agent-menu {
+  width: min(260px, calc(100vw - 32px));
+}
+
+.opencode-agent .permission-editor {
+  width: min(420px, calc(100vw - 32px));
+}
+
+.opencode-agent .permission-editor-header,
+.opencode-agent .saved-permissions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 8px;
+}
+
+.opencode-agent .permission-tool-list,
+.opencode-agent .saved-permissions-list {
+  display: grid;
+  gap: 6px;
+}
+
+.opencode-agent .permission-group {
+  display: grid;
+  gap: 4px;
+  padding: 6px;
+  border: 1px solid rgba(137, 147, 205, 0.1);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.opencode-agent .permission-group-label {
+  color: var(--agent-polish-cyan);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.opencode-agent .permission-tool-row,
+.opencode-agent .saved-permission-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.opencode-agent .permission-tool-label,
+.opencode-agent .saved-permission-info {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--agent-polish-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .permission-toggle-group {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid rgba(137, 147, 205, 0.12);
+  border-radius: 7px;
+  background: rgba(12, 15, 21, 0.42);
+}
+
+.opencode-agent .permission-toggle-option {
+  min-height: 23px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--agent-polish-muted);
+  font-size: 10px;
+}
+
+.opencode-agent .permission-toggle-option.active {
+  background: rgba(101, 209, 195, 0.14);
+  color: #c7fff7;
+}
+
+.opencode-agent .agent-work-locally {
+  min-height: 20px;
+  margin-left: 2px;
+  color: #bac3ea;
+  font-size: 11px;
+}
+
+@media (max-width: 1180px) {
+  .opencode-agent .agent-chat-scroll {
+    padding: 10px 12px 12px !important;
+  }
+
+  .opencode-agent .agent-composer-shell {
+    padding: 7px 10px 10px !important;
+  }
+
+  .opencode-agent .agent-composer-footer {
+    gap: 5px;
+    padding-right: 6px;
+    padding-left: 6px;
+  }
+
+  .opencode-agent .access-wrap {
+    min-width: 68px;
+  }
+
+  .opencode-agent .model-wrap {
+    min-width: 54px;
+  }
+
+  .opencode-agent .agent-wrap {
+    min-width: 62px;
+  }
+
+  .opencode-agent .permission-button,
+  .opencode-agent .model-button {
+    padding: 0 6px;
+  }
+
+  .opencode-agent .composer-context-chips {
+    max-width: 42%;
+  }
+}
+
+/* Step 6-9 parity surfaces: session context, VCS, MCP/provider status, runtime feed. */
+.opencode-agent .agent-parity-section,
+.opencode-agent .agent-context-panel,
+.opencode-agent .agent-vcs-panel,
+.opencode-agent .agent-mcp-panel,
+.opencode-agent .agent-provider-status,
+.opencode-agent .agent-status-grid,
+.opencode-agent .agent-command-grid,
+.opencode-agent .agent-compact-card {
+  --agent-parity-bg: rgba(18, 22, 30, 0.66);
+  --agent-parity-bg-strong: rgba(39, 42, 55, 0.94);
+  --agent-parity-border: rgba(137, 147, 205, 0.16);
+  --agent-parity-border-hot: rgba(101, 209, 195, 0.28);
+  --agent-parity-text: var(--agent-polish-text, #eef2ff);
+  --agent-parity-muted: var(--agent-polish-muted, #9aa5d0);
+  --agent-parity-cyan: var(--agent-polish-cyan, #65d1c3);
+  --agent-parity-yellow: var(--agent-polish-yellow, #f1c84b);
+  --agent-parity-red: var(--agent-polish-red, #f27676);
+}
+
+.opencode-agent .agent-parity-section,
+.opencode-agent .agent-context-panel,
+.opencode-agent .agent-vcs-panel,
+.opencode-agent .agent-mcp-panel {
+  display: grid;
+  justify-self: start;
+  gap: 9px;
+  width: min(100%, 520px);
+  min-width: 0;
+  margin-top: 4px;
+  padding: 10px;
+  border: 1px solid var(--agent-parity-border);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(137, 147, 205, 0.045), transparent 38px),
+    var(--agent-parity-bg);
+  color: var(--agent-parity-text);
+}
+
+.opencode-agent .agent-message.user :where(.agent-parity-section, .agent-context-panel, .agent-vcs-panel, .agent-mcp-panel) {
+  justify-self: end;
+}
+
+.opencode-agent :where(.agent-parity-section, .agent-context-panel, .agent-vcs-panel, .agent-mcp-panel) > :where(header, .agent-section-header, .agent-panel-header) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  min-height: 26px;
+}
+
+.opencode-agent :where(.agent-parity-section, .agent-context-panel, .agent-vcs-panel, .agent-mcp-panel) :where(h2, h3, h4, strong) {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--agent-parity-text);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent :where(.agent-parity-section, .agent-context-panel, .agent-vcs-panel, .agent-mcp-panel) :where(p, small) {
+  margin: 0;
+  color: var(--agent-parity-muted);
+  font-size: 11px;
+  line-height: 1.42;
+}
+
+.opencode-agent :where(.agent-parity-section, .agent-context-panel, .agent-vcs-panel, .agent-mcp-panel) code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: #cbd2ef;
+  font: 11px/1.45 Consolas, "Courier New", monospace;
+}
+
+.opencode-agent .agent-context-panel :where(ul, ol),
+.opencode-agent .agent-vcs-panel :where(ul, ol),
+.opencode-agent .agent-runtime-feed :where(ul, ol) {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.opencode-agent :where(.agent-context-item, .agent-vcs-change, .agent-mcp-server, .agent-runtime-event),
+.opencode-agent .agent-context-panel :where(li, article),
+.opencode-agent .agent-vcs-panel :where(li, article),
+.opencode-agent .agent-mcp-panel :where(li, article),
+.opencode-agent .agent-runtime-feed :where(li, article) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  min-height: 30px;
+  padding: 6px 7px;
+  border: 1px solid rgba(137, 147, 205, 0.09);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.opencode-agent :where(.agent-context-item, .agent-vcs-change, .agent-mcp-server, .agent-runtime-event) > :where(span, strong, small),
+.opencode-agent .agent-context-panel li > :where(span, strong, small),
+.opencode-agent .agent-vcs-panel li > :where(span, strong, small),
+.opencode-agent .agent-mcp-panel li > :where(span, strong, small),
+.opencode-agent .agent-runtime-feed li > :where(span, strong, small) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .agent-context-popover {
+  position: absolute;
+  z-index: 95;
+  display: grid;
+  gap: 7px;
+  width: min(360px, calc(100vw - 32px));
+  max-height: min(380px, calc(100vh - 128px));
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(137, 147, 205, 0.2);
+  border-radius: 8px;
+  background: #282b38;
+  color: var(--agent-polish-text, #eef2ff);
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.42);
+  scrollbar-color: rgba(137, 147, 205, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.opencode-agent .agent-context-popover::-webkit-scrollbar,
+.opencode-agent .agent-runtime-feed::-webkit-scrollbar,
+.opencode-agent .agent-vcs-panel::-webkit-scrollbar,
+.opencode-agent .agent-mcp-panel::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.opencode-agent .agent-context-popover::-webkit-scrollbar-thumb,
+.opencode-agent .agent-runtime-feed::-webkit-scrollbar-thumb,
+.opencode-agent .agent-vcs-panel::-webkit-scrollbar-thumb,
+.opencode-agent .agent-mcp-panel::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(137, 147, 205, 0.42);
+  background-clip: padding-box;
+}
+
+.opencode-agent .agent-status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 7px;
+  width: min(100%, 520px);
+  min-width: 0;
+}
+
+.opencode-agent .agent-status-grid > *,
+.opencode-agent .agent-provider-status {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  min-height: 58px;
+  padding: 9px;
+  border: 1px solid var(--agent-parity-border);
+  border-radius: 8px;
+  background: var(--agent-parity-bg);
+  color: var(--agent-parity-text);
+}
+
+.opencode-agent .agent-status-grid > * :where(strong, span),
+.opencode-agent .agent-provider-status :where(strong, span) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .agent-status-grid > * :where(small, em),
+.opencode-agent .agent-provider-status :where(small, em) {
+  color: var(--agent-parity-muted);
+  font-size: 10px;
+  font-style: normal;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *)[data-state="connected"],
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *).connected,
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *).healthy {
+  border-color: rgba(101, 209, 195, 0.3);
+  background: linear-gradient(180deg, rgba(101, 209, 195, 0.09), rgba(18, 22, 30, 0.66));
+}
+
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *)[data-state="warning"],
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *).warning,
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *).dirty {
+  border-color: rgba(241, 200, 75, 0.3);
+  background: linear-gradient(180deg, rgba(241, 200, 75, 0.08), rgba(18, 22, 30, 0.66));
+}
+
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *)[data-state="error"],
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *).error,
+.opencode-agent :where(.agent-provider-status, .agent-compact-card, .agent-status-grid > *).unhealthy {
+  border-color: rgba(242, 118, 118, 0.32);
+  background: linear-gradient(180deg, rgba(242, 118, 118, 0.08), rgba(18, 22, 30, 0.66));
+}
+
+.opencode-agent .agent-command-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 7px;
+  width: min(100%, 520px);
+  min-width: 0;
+}
+
+.opencode-agent .agent-command-grid > :where(button, a, .agent-compact-card),
+.opencode-agent .agent-compact-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  min-height: 42px;
+  padding: 8px 9px;
+  border: 1px solid var(--agent-parity-border);
+  border-radius: 8px;
+  background: var(--agent-parity-bg);
+  color: var(--agent-parity-text);
+  text-align: left;
+  text-decoration: none;
+}
+
+.opencode-agent .agent-command-grid > :where(button, a):hover,
+.opencode-agent .agent-compact-card:hover,
+.opencode-agent .agent-compact-card.active,
+.opencode-agent .agent-compact-card[aria-selected="true"] {
+  border-color: var(--agent-parity-border-hot);
+  background: rgba(101, 209, 195, 0.08);
+  color: #c7fff7;
+}
+
+.opencode-agent .agent-command-grid svg,
+.opencode-agent .agent-compact-card svg {
+  flex: 0 0 auto;
+  color: var(--agent-parity-cyan);
+}
+
+.opencode-agent .agent-command-grid :where(strong, span),
+.opencode-agent .agent-compact-card :where(strong, span) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .agent-command-grid :where(small, em),
+.opencode-agent .agent-compact-card :where(small, em) {
+  color: var(--agent-parity-muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.opencode-agent .agent-runtime-feed {
+  max-height: min(300px, 42vh);
+  overflow: auto;
+  scrollbar-color: rgba(137, 147, 205, 0.42) transparent;
+  scrollbar-width: thin;
+}
+
+.opencode-agent .agent-runtime-feed :where(time, .agent-runtime-time) {
+  color: var(--agent-parity-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.opencode-agent .agent-vcs-panel :where(.agent-vcs-branch, .agent-vcs-summary),
+.opencode-agent .agent-mcp-panel :where(.agent-mcp-summary, .agent-provider-summary) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px;
+  border: 1px solid rgba(101, 209, 195, 0.14);
+  border-radius: 7px;
+  background: rgba(101, 209, 195, 0.055);
+}
+
+.opencode-agent .agent-mcp-server-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+}
+
+.opencode-agent .agent-mcp-server-actions button {
+  min-height: 22px;
+  padding: 0 6px;
+  font-size: 10px;
+}
+
+.terminal-engine-pty-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border-bottom: 1px solid rgba(137, 147, 205, 0.16);
+  background: rgba(16, 19, 24, 0.88);
+  color: #d7dee8;
+  font-size: 11px;
+}
+
+.terminal-engine-pty-strip span {
+  color: #65d1c3;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.terminal-engine-pty-strip small {
+  min-width: 0;
+  overflow: hidden;
+  color: #9aa5d0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-engine-pty-strip button {
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(101, 209, 195, 0.22);
+  border-radius: 6px;
+  background: rgba(101, 209, 195, 0.06);
+  color: #c7fff7;
+  font-size: 11px;
+}
+
+.diagnostics-panel {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  height: 100%;
+  padding: 10px;
+  overflow: auto;
+  background: #101318;
+  color: #d7dee8;
+}
+
+.diagnostics-panel header,
+.diagnostics-panel article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.diagnostics-panel header {
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(137, 147, 205, 0.16);
+}
+
+.diagnostics-panel header strong {
+  color: #eef2ff;
+}
+
+.diagnostics-panel header small,
+.diagnostics-panel article small {
+  min-width: 0;
+  overflow: hidden;
+  color: #9aa5d0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diagnostics-panel header button {
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(101, 209, 195, 0.25);
+  border-radius: 6px;
+  background: rgba(101, 209, 195, 0.07);
+  color: #c7fff7;
+}
+
+.diagnostics-panel article {
+  grid-template-columns: 112px 96px minmax(0, 1fr);
+  padding: 8px;
+  border: 1px solid rgba(137, 147, 205, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.diagnostics-panel article.ok {
+  border-color: rgba(101, 209, 195, 0.22);
+}
+
+.diagnostics-panel article.error {
+  border-color: rgba(242, 118, 118, 0.28);
+}
+
+.diagnostics-panel article span {
+  color: #65d1c3;
+  font-weight: 700;
+}
+
+.diagnostics-error {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid rgba(242, 118, 118, 0.28);
+  border-radius: 7px;
+  background: rgba(242, 118, 118, 0.07);
+  color: #ffc5c5;
+}
+
+.opencode-agent .agent-vcs-panel :where(button, a),
+.opencode-agent .agent-mcp-panel :where(button, a),
+.opencode-agent .agent-context-panel :where(button, a),
+.opencode-agent .agent-context-popover :where(button, a) {
+  min-height: 27px;
+  padding: 0 9px;
+  border: 1px solid rgba(101, 209, 195, 0.24);
+  border-radius: 6px;
+  background: rgba(101, 209, 195, 0.07);
+  color: #c7fff7;
+  font-size: 11px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.opencode-agent .agent-vcs-panel :where(button, a):hover,
+.opencode-agent .agent-mcp-panel :where(button, a):hover,
+.opencode-agent .agent-context-panel :where(button, a):hover,
+.opencode-agent .agent-context-popover :where(button, a):hover {
+  border-color: rgba(241, 200, 75, 0.42);
+  background: rgba(241, 200, 75, 0.1);
+  color: #ffe28a;
+}
+
+@media (max-width: 1180px) {
+  .opencode-agent .agent-parity-section,
+  .opencode-agent .agent-context-panel,
+  .opencode-agent .agent-vcs-panel,
+  .opencode-agent .agent-mcp-panel {
+    padding: 9px;
+  }
+
+  .opencode-agent .agent-command-grid,
+  .opencode-agent .agent-status-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .opencode-agent .agent-context-popover {
+    width: min(320px, calc(100vw - 24px));
+  }
+}
+
+/* Composer dropdown repair: permission + model menus should feel like Codex controls, not debug panels. */
+.opencode-agent .agent-composer-card,
+.opencode-agent .agent-composer-footer,
+.opencode-agent .composer-control-wrap {
+  overflow: visible;
+}
+
+.opencode-agent .agent-composer-footer {
+  isolation: isolate;
+}
+
+.opencode-agent .access-wrap,
+.opencode-agent .model-wrap {
+  position: relative;
+}
+
+.opencode-agent .access-wrap .permission-editor,
+.opencode-agent .model-wrap .model-menu {
+  z-index: 250;
+  bottom: calc(100% + 10px);
+  overflow: auto;
+  border: 1px solid rgba(137, 147, 205, 0.22);
+  background:
+    linear-gradient(180deg, rgba(49, 52, 69, 0.98), rgba(36, 39, 52, 0.98)),
+    #242733;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
+  scrollbar-color: rgba(137, 147, 205, 0.48) transparent;
+  scrollbar-width: thin;
+}
+
+.opencode-agent .access-wrap .permission-editor {
+  right: auto !important;
+  left: -42px !important;
+  width: min(332px, calc(100vw - 96px));
+  max-height: min(430px, calc(100vh - 220px));
+  padding: 8px;
+  border-radius: 12px;
+}
+
+.opencode-agent .model-wrap .model-menu {
+  right: -44px !important;
+  left: auto !important;
+  width: min(236px, calc(100vw - 96px));
+  max-height: min(330px, calc(100vh - 220px));
+  padding: 6px;
+  border-radius: 12px;
+}
+
+.opencode-agent .permission-editor-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -2px -2px 6px;
+  padding: 9px 9px 8px;
+  border-bottom: 1px solid rgba(137, 147, 205, 0.14);
+  border-radius: 9px 9px 0 0;
+  background: rgba(36, 39, 52, 0.96);
+}
+
+.opencode-agent .permission-editor-header strong {
+  color: #f4f7ff;
+  font-size: 12px;
+}
+
+.opencode-agent .permission-editor-header small {
+  color: #9aa5d0;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.opencode-agent .permission-tool-list {
+  display: grid;
+  gap: 7px;
+}
+
+.opencode-agent .permission-group {
+  gap: 5px;
+  padding: 7px;
+  border-color: rgba(137, 147, 205, 0.13);
+  background: rgba(13, 16, 24, 0.28);
+}
+
+.opencode-agent .permission-tool-row {
+  display: grid !important;
+  grid-template-columns: minmax(92px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  padding: 3px 2px;
+}
+
+.opencode-agent .permission-tool-label {
+  color: #dbe2ff;
+  font-size: 11px;
+}
+
+.opencode-agent .permission-toggle-group {
+  display: inline-grid;
+  grid-template-columns: repeat(3, 42px);
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid rgba(137, 147, 205, 0.14);
+  border-radius: 8px;
+  background: rgba(10, 12, 18, 0.58);
+}
+
+.opencode-agent .permission-toggle-option {
+  min-width: 0;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  color: #b8c1e8;
+  font-size: 10px;
+  text-align: center;
+}
+
+.opencode-agent .permission-toggle-option.active {
+  background: rgba(101, 209, 195, 0.2);
+  color: #d8fff9;
+  box-shadow: inset 0 0 0 1px rgba(101, 209, 195, 0.22);
+}
+
+.opencode-agent .permission-toggle-option:nth-child(3).active {
+  background: rgba(242, 118, 118, 0.2);
+  color: #ffd0d0;
+  box-shadow: inset 0 0 0 1px rgba(242, 118, 118, 0.22);
+}
+
+.opencode-agent .permission-rule-section {
+  display: grid;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid rgba(137, 147, 205, 0.13);
+  border-radius: 10px;
+  background: rgba(12, 15, 23, 0.42);
+}
+
+.opencode-agent .permission-rule-header,
+.opencode-agent .permission-rule-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.opencode-agent .permission-rule-header {
+  justify-content: space-between;
+}
+
+.opencode-agent .permission-rule-header strong {
+  display: block;
+  color: #f4f7ff;
+  font-size: 11px;
+}
+
+.opencode-agent .permission-rule-header small {
+  display: block;
+  color: #9aa5d0;
+  font-size: 10px;
+  line-height: 1.3;
+}
+
+.opencode-agent .permission-rule-actions button,
+.opencode-agent .permission-rule-clear {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(101, 209, 195, 0.22);
+  border-radius: 7px;
+  background: rgba(101, 209, 195, 0.08);
+  color: #d8fff9;
+  font-size: 10px;
+}
+
+.opencode-agent .permission-rule-clear {
+  justify-self: start;
+  color: #ffd0d0;
+  border-color: rgba(242, 118, 118, 0.2);
+  background: rgba(242, 118, 118, 0.08);
+}
+
+.opencode-agent .permission-rule-list {
+  display: grid;
+  gap: 6px;
+}
+
+.opencode-agent .permission-rule-row {
+  display: grid;
+  grid-template-columns: minmax(74px, 0.75fr) minmax(92px, 1fr) minmax(64px, 0.65fr) 28px;
+  gap: 5px;
+  align-items: center;
+  min-width: 0;
+}
+
+.opencode-agent .permission-rule-row :where(select, input) {
+  width: 100%;
+  min-width: 0;
+  min-height: 27px;
+  border: 1px solid rgba(137, 147, 205, 0.16);
+  border-radius: 7px;
+  background: rgba(9, 11, 18, 0.64);
+  color: #edf2ff;
+  font-size: 10.5px;
+}
+
+.opencode-agent .permission-rule-row select {
+  padding: 0 6px;
+}
+
+.opencode-agent .permission-rule-row input {
+  padding: 0 7px;
+}
+
+.opencode-agent .permission-rule-description {
+  grid-column: 1 / -1;
+  color: #b8c1e8 !important;
+}
+
+.opencode-agent .permission-rule-empty {
+  padding: 8px;
+  border: 1px dashed rgba(137, 147, 205, 0.16);
+  border-radius: 8px;
+  color: #9aa5d0;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.opencode-agent .permission-rule-empty code {
+  color: #65d1c3;
+}
+
+.opencode-agent .model-menu button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 7px 8px;
+  border-radius: 8px;
+}
+
+.opencode-agent .model-menu button strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #edf2ff;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opencode-agent .model-menu button small {
+  max-width: 58px;
+  overflow: hidden;
+  color: #65d1c3;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.opencode-agent .model-menu button:hover,
+.opencode-agent .model-menu button.selected {
+  background: rgba(101, 209, 195, 0.12);
+  color: #ffffff;
+}
+
+/* Assistant responsive + expanded mode */
+.opencode-agent {
+  container-type: inline-size;
+}
+
+.vscode-workbench.agent-expanded .opencode-workbench .editor-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.vscode-workbench.agent-expanded .editor-terminal-column,
+.vscode-workbench.agent-expanded .right-resize {
+  display: none !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent {
+  display: grid !important;
+  grid-column: 1;
+  min-width: 0;
+  width: 100%;
+  border-left: 0;
+}
+
+.vscode-workbench.agent-expanded .agent-chat-scroll {
+  align-content: start;
+  padding-right: max(18px, 9vw) !important;
+  padding-left: max(18px, 9vw) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent :where(.agent-message-body, .agent-tool-list, .agent-diff-list, .agent-permission-list, .agent-inline-activity) {
+  max-width: min(760px, 100%);
+}
+
+.vscode-workbench.agent-expanded .agent-composer-shell {
+  padding-right: max(18px, 9vw) !important;
+  padding-left: max(18px, 9vw) !important;
+}
+
+.vscode-workbench.agent-expanded .agent-composer-card {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.opencode-agent .agent-capability-strip {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.opencode-agent .agent-capability-strip::-webkit-scrollbar,
+.opencode-agent .agent-thread-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.opencode-agent .agent-capability-strip > button,
+.opencode-agent .agent-capability-strip > span {
+  flex: 0 0 auto;
+  max-width: 178px;
+}
+
+.opencode-agent .agent-thread-actions {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+@container (max-width: 390px) {
+  .opencode-agent .agent-thread-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 6px;
+    padding-right: 8px;
+    padding-left: 8px;
+  }
+
+  .opencode-agent .agent-thread-actions {
+    max-width: 178px;
+    justify-content: flex-start;
+  }
+
+  .opencode-agent .agent-thread-actions .icon-button {
+    flex: 0 0 25px;
+  }
+
+  .opencode-agent .agent-capability-strip {
+    gap: 5px;
+    padding: 7px 9px;
+  }
+
+  .opencode-agent .agent-capability-strip > button,
+  .opencode-agent .agent-capability-strip > span {
+    max-width: 138px;
+    padding: 4px 7px;
+  }
+
+  .opencode-agent .agent-chat-scroll {
+    padding: 9px 10px 10px !important;
+  }
+
+  .opencode-agent .agent-message-meta,
+  .opencode-agent .agent-message-body,
+  .opencode-agent .agent-tool-list,
+  .opencode-agent .agent-diff-list,
+  .opencode-agent .agent-permission-list,
+  .opencode-agent .agent-inline-activity {
+    max-width: 100%;
+  }
+
+  .opencode-agent .agent-composer-shell {
+    padding: 8px 8px 10px !important;
+  }
+
+  .opencode-agent .composer-context-line {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+    padding: 8px 9px 0;
+  }
+
+  .opencode-agent .composer-context-chips {
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .opencode-agent .composer-context-chips::-webkit-scrollbar {
+    display: none;
+  }
+
+  .opencode-agent .agent-composer-footer {
+    display: grid !important;
+    grid-template-columns: 32px minmax(0, 1fr) minmax(0, 1fr) 32px 38px;
+    gap: 6px;
+    padding: 6px 7px 8px;
+  }
+
+  .opencode-agent .agent-wrap {
+    grid-column: 2 / 4;
+  }
+
+  .opencode-agent .access-wrap,
+  .opencode-agent .model-wrap,
+  .opencode-agent .agent-wrap {
+    min-width: 0;
+  }
+
+  .opencode-agent .permission-button,
+  .opencode-agent .model-button {
+    width: 100%;
+  }
+}
+
+/* Explicit assistant expand affordance and full-workspace mode. */
+.opencode-agent .agent-chat-header {
+  min-width: 0;
+}
+
+.opencode-agent .agent-header-actions {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.opencode-agent .agent-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 26px;
+  max-width: 96px;
+  min-width: 78px;
+  padding: 0 9px;
+  border: 1px solid rgba(157, 140, 255, 0.34);
+  border-radius: 8px;
+  background: rgba(157, 140, 255, 0.08);
+  color: #d8d2ff;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.opencode-agent .agent-expand-toggle:hover,
+.opencode-agent .agent-expand-toggle[aria-pressed="true"] {
+  border-color: rgba(101, 209, 195, 0.42);
+  background: rgba(101, 209, 195, 0.12);
+  color: #ecfffb;
+}
+
+.opencode-agent .agent-expand-toggle span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vscode-workbench.agent-expanded .opencode-workbench .editor-grid {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
+.vscode-workbench.agent-expanded .editor-terminal-column,
+.vscode-workbench.agent-expanded .right-resize {
+  display: none !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded {
+  display: flex !important;
+  grid-column: 1 / -1 !important;
+  width: 100% !important;
+  max-width: none !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  border-left: 0;
+  background: var(--codex-panel-bg, #20222d);
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-chat-header,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-toolbar,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-capability-strip,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-composer-shell {
+  padding-right: max(24px, 12vw) !important;
+  padding-left: max(24px, 12vw) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-chat-scroll {
+  padding-right: max(24px, 12vw) !important;
+  padding-left: max(24px, 12vw) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded :where(.agent-message-meta, .agent-message-body, .agent-tool-list, .agent-diff-list, .agent-permission-list, .agent-inline-activity, .agent-todo-list, .agent-runtime-feed) {
+  max-width: min(820px, 100%) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-composer-card {
+  width: min(820px, 100%) !important;
+  max-width: min(820px, 100%) !important;
+  margin-right: auto !important;
+  margin-left: auto !important;
+}
+
+@container (max-width: 390px) {
+  .opencode-agent .agent-expand-toggle {
+    min-width: 34px;
+    width: 34px;
+    padding: 0;
+  }
+
+  .opencode-agent .agent-expand-toggle span {
+    display: none;
+  }
+}
+
+/* Expanded assistant polish: align it like a focused Codex workspace, not a stretched sidebar. */
+.vscode-workbench.agent-expanded {
+  --agent-expanded-width: 920px;
+  --agent-expanded-gutter: max(20px, calc((100% - var(--agent-expanded-width)) / 2));
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded {
+  overflow: hidden;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-chat-header,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-toolbar,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-capability-strip,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-composer-shell {
+  padding-right: var(--agent-expanded-gutter) !important;
+  padding-left: var(--agent-expanded-gutter) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-chat-header {
+  min-height: 38px;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 40px;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-title {
+  max-width: 420px;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-actions {
+  max-width: min(480px, 100%);
+  justify-content: flex-end;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-capability-strip {
+  flex-wrap: wrap;
+  gap: 7px;
+  overflow: visible;
+  border-top: 1px solid rgba(137, 147, 205, 0.07);
+  border-bottom: 1px solid rgba(137, 147, 205, 0.08);
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-capability-strip > button,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-capability-strip > span {
+  max-width: 220px;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-chat-scroll {
+  padding: 18px var(--agent-expanded-gutter) 18px !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message {
+  width: min(var(--agent-expanded-width), 100%);
+  max-width: min(var(--agent-expanded-width), 100%);
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message-meta {
+  max-width: min(820px, 100%) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message-body,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-tool-list,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-diff-list,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-permission-list,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-inline-activity,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-todo-list,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-runtime-feed {
+  max-width: min(820px, 100%) !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-tool-card,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-diff-card,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-permission-card,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-tool-details {
+  max-width: 100%;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-composer-shell {
+  position: relative;
+  padding-top: 10px !important;
+  padding-bottom: 14px !important;
+  border-top: 1px solid rgba(137, 147, 205, 0.12);
+  box-shadow: 0 -18px 42px rgba(10, 12, 18, 0.24);
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-composer-card {
+  width: min(var(--agent-expanded-width), 100%) !important;
+  max-width: min(var(--agent-expanded-width), 100%) !important;
+}
+
+@media (max-width: 980px) {
+  .vscode-workbench.agent-expanded {
+    --agent-expanded-width: 100%;
+    --agent-expanded-gutter: 18px;
+  }
+}
+
+@media (max-width: 720px) {
+  .vscode-workbench.agent-expanded {
+    --agent-expanded-gutter: 10px;
+  }
+
+  .vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+  }
+
+  .vscode-workbench.agent-expanded .opencode-agent.expanded .agent-thread-actions {
+    max-width: 100%;
+    justify-content: flex-start;
+  }
+
+  .vscode-workbench.agent-expanded .opencode-agent.expanded .agent-capability-strip {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+  }
+}
+
+/* Expanded assistant final alignment pass. */
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-activity-rail {
+  padding: 8px var(--agent-expanded-gutter) 6px !important;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: rgba(32, 34, 45, 0.96);
+  scrollbar-width: none;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-activity-rail::-webkit-scrollbar {
+  display: none;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-activity-chip {
+  flex: 0 0 auto;
+  max-width: 190px;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-session-popover,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-provider-popover {
+  right: auto;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(340px, calc(100vw - (var(--agent-expanded-gutter) * 2)));
+  max-height: min(360px, calc(100vh - 210px));
+  border-color: rgba(101, 209, 195, 0.2);
+  border-radius: 12px;
+  background: #272a37;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-chat-scroll {
+  gap: 16px;
+  padding-top: 14px !important;
+  padding-bottom: 14px !important;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message {
+  align-self: center;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message + .agent-message {
+  margin-top: 4px;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.user {
+  justify-items: end;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.assistant,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.system {
+  justify-items: start;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.user .agent-message-meta,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.user .agent-message-body {
+  margin-left: auto;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.assistant .agent-message-meta,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.assistant .agent-message-body,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.system .agent-message-meta,
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-message.system .agent-message-body {
+  margin-right: auto;
+}
+
+.vscode-workbench.agent-expanded .opencode-agent.expanded .agent-composer-shell {
+  background:
+    linear-gradient(180deg, rgba(32, 34, 45, 0), rgba(32, 34, 45, 0.96) 22px),
+    var(--codex-panel-bg, #20222d);
+}
+
+@media (max-width: 720px) {
+  .vscode-workbench.agent-expanded .opencode-agent.expanded .agent-session-popover,
+  .vscode-workbench.agent-expanded .opencode-agent.expanded .agent-provider-popover {
+    left: 10px;
+    right: 10px;
+    width: auto;
+    transform: none;
+  }
 }

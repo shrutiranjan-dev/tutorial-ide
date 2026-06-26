@@ -97,6 +97,49 @@
 - Project copy via `fsp.cp` (recursive)
 - CLI command palette: `code run`, `code install`, `code update --check`, `code models`
 
+### Wave 7 — Step 6-9 OpenCode Parity Surfaces
+- Session context bridge: `opencode:sessionContext` reads `/api/session/:id/context` with legacy fallback
+- Agent context UI: compact counts for messages, tools, todos, diff, permissions, tokens, and recent messages
+- VCS bridge: `opencode:vcsStatus`, `opencode:vcsDiff`, `opencode:vcsStage`, `opencode:vcsUnstage` try engine routes first and fall back to local git
+- GUI VCS controls: agent strip exposes refresh, diff, stage, and unstage without opening the terminal UI
+- MCP bridge: `opencode:mcpConnect` / `opencode:mcpDisconnect` call engine MCP connection routes
+- MCP GUI controls: MCP popover shows configured servers, connection status, connect/disconnect actions, integrations, and engine commands
+- Global config bridge: `opencode:globalConfig` and `opencode:writeGlobalConfig` expose `/global/config` read/write fallback routes
+- Provider/auth surface: compact provider readiness/auth-needed status and credential-aware connect/manage actions remain in the Codex-style panel
+
+### Wave 8 — Steps 1-2 Parity Audit + Engine Client
+- Added `npm run check:parity` to generate `docs/OPENCODE_PARITY_MATRIX.md` from `vendor/code/specs/v2/api.html`
+- Parity matrix compares upstream operations against `electron/main.cjs`, `electron/opencode-client.cjs`, `electron/preload.cjs`, and `src/types.ts`
+- Previous generated counts: 67 upstream operations, 15 exact route matches, 41 partial surfaces, 11 missing surfaces
+- Added `electron/opencode-client.cjs` as the central Code engine HTTP adapter
+- Existing `openCodeFetch`, `openCodeFetchFirst`, query helpers, JSON helpers, unwrap, and array helpers now delegate through the client
+- Session context, VCS status/diff/stage/unstage, MCP connect/disconnect, and global config read/write route-family helpers now call typed client methods
+
+### Wave 9 — Steps 3-5 Composer, Runtime Fidelity, Patch Apply
+- Composer model selection now calls the active-session model switch handler instead of only changing local UI state
+- Selected Code agent now reaches the backend prompt path; session keys include agent name so agent switches do not reuse the wrong `build` session
+- Runtime reducer now preserves long assistant responses and treats “Code completed with N tool steps” as a fallback only, not a replacement for real text
+- Final polling waits longer before accepting tool-only completion and refreshes messages once before settling
+- Added engine-first `vcs.applyPatch` client support for `/api/vcs/patch`, `/api/vcs/apply`, `/vcs/patch`, and `/vcs/apply`
+- Added `opencode:vcsPatch` / `opencode:vcsApply` IPC and preload/browser/type coverage with local `git apply` fallback
+- Agent diff cards now expose an `Apply patch` action when patch content is available
+- Current generated parity counts: 67 upstream operations, 16 exact route matches, 40 partial surfaces, 11 missing surfaces
+
+### Wave 10 — Steps 6-9 Formatter, FS, LSP, PTY Parity
+- Added engine-first client support for formatter status, LSP status, file tree, file read, file search, grep, and PTY create/list/get/update/delete route families
+- Added IPC handlers for `opencode:formatterStatus`, `opencode:lspStatus`, `opencode:fsTree`, `opencode:fsFile`, `opencode:fsSearch`, `opencode:fsGrep`, and `opencode:pty*`
+- `workspace:search` now tries the engine `fs.grep` path first, then falls back to local workspace search
+- Added preload bridge, browser-preview stubs, and TypeScript bridge contract coverage for the new engine route families
+- Updated `scripts/generate-opencode-parity.cjs` so formatter, FS, LSP, PTY, and VCS patch/apply routes count against parity
+- Current generated parity counts: 67 upstream operations, 27 exact route matches, 40 partial surfaces, 0 missing surfaces
+
+### Wave 11 — Steps 10-12 Full Route Parity Closure
+- Added exact v2 client adapters for session diff/todo/wait, config get/update, auth CRUD/activate, catalog model list/get, event subscribe, MCP prompt/resource/server/OAuth routes, permission list/reply, question list/reply/reject, VCS get, project, and workspace routes
+- Existing session diff/todo, permission, event stream, config read, VCS, question, project-list, and workspace/project bridges now prefer exact engine routes where practical while keeping old fallbacks
+- Added IPC, preload, browser-preview stubs, and TypeScript bridge coverage for the new callable surfaces
+- Updated parity generation so all new route families are tracked against their explicit bridge methods
+- Current generated parity counts: 67 upstream operations, 67 exact route matches, 0 partial surfaces, 0 missing surfaces
+
 ---
 
 ## Bugs Fixed
@@ -115,15 +158,15 @@
 
 | Engine API | GUI Status |
 |---|---|
-| `/api/provider` / `/api/integration` | Uses hardcoded list + Ollama sync, not v2 provider API |
-| `/api/integration/:id/connect/key` | Key-based auth not integrated |
-| `/api/session/:id/context` | Session context not exposed |
-| `/vcs/*` (diff/status/apply) | Uses git CLI directly, not engine API |
-| `/mcp/:name/connect` / disconnect | GUI only reads/writes `mcp.json`, no connect/disconnect |
-| `/project/*` | Not used |
+| Parity matrix | Generated by `npm run check:parity`; use it as the source of truth for next gap selection |
+| `/api/provider` / `/api/integration` | Provider/integration state is integrated, but provider UX can still be refined |
+| `/api/integration/:id/connect/key` | API-key auth is available through provider actions, but needs better non-prompt forms |
+| `/vcs/apply` | Integrated through engine-first patch/apply routes with local `git apply` fallback and GUI diff action |
+| `/project/*` | Exact engine project routes are now bridged; current UI still mainly uses local project picker flows |
 | `/experimental/*` | None exposed |
-| `/global/config` PATCH | No write endpoint for global config |
+| `/global/config` PATCH | Bridge exists; dedicated global-config editor is still light |
 | PTY WebSocket | HTTP polling only; no WS `/api/pty/:id/connect` |
+| Formatter/FS/LSP/PTY HTTP routes | Integrated through engine-first adapters with local/browser fallbacks where practical |
 
 ---
 
@@ -146,3 +189,19 @@ npm start            # Run Electron-only (after build)
 ```
 
 Current build: ~6s, 1710 modules, 623KB JS + 117KB CSS output.
+
+Latest verification after Wave 11:
+
+```bash
+node --check electron/main.cjs
+node --check electron/opencode-client.cjs
+node --check electron/preload.cjs
+node --check scripts/generate-opencode-parity.cjs
+npm run check:bridge
+npm run build
+npm run check:parity
+npm audit --audit-level=moderate
+git diff --check
+```
+
+All passed. Current Vite output is ~659KB JS + 136KB CSS with the existing large-chunk warning.

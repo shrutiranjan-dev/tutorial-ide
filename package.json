@@ -7,6 +7,9 @@
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron --no-sandbox .\"",
     "build": "tsc --noEmit && vite build",
+    "check:bridge": "node scripts/check-opencode-bridge.cjs",
+    "check:gui-parity": "node scripts/check-opencode-gui-parity.cjs",
+    "check:parity": "node scripts/generate-opencode-parity.cjs",
     "preview": "vite preview --host 127.0.0.1",
     "start": "electron --no-sandbox ."
   },
@@ -29,7 +32,12 @@
     "@types/react-dom": "^19.2.3",
     "concurrently": "^9.2.1",
     "typescript": "^5.9.3",
-    "vite": "^7.2.4",
+    "vite": "^7.3.6",
     "wait-on": "^9.0.3"
+  },
+  "overrides": {
+    "monaco-editor": {
+      "dompurify": "3.4.11"
+    }
   }
 }

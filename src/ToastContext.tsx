@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
 import { X, AlertCircle, CheckCircle2, Info } from "lucide-react";
 
-export type ToastType = "info" | "success" | "warn" | "danger";
+export type ToastType = "info" | "success" | "warn" | "danger" | "error";
 
 type Toast = {
   id: string;
@@ -48,7 +48,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             borderRadius: "6px",
             borderLeft: `4px solid ${
               toast.type === "success" ? "#4ade80" :
-              toast.type === "danger" ? "#f87171" :
+              toast.type === "danger" || toast.type === "error" ? "#f87171" :
               toast.type === "warn" ? "#fbbf24" : "#60a5fa"
             }`,
             boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
@@ -60,7 +60,7 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
             animation: "slideIn 0.2s ease-out"
           }}>
             {toast.type === "success" && <CheckCircle2 size={16} color="#4ade80" />}
-            {toast.type === "danger" && <AlertCircle size={16} color="#f87171" />}
+            {(toast.type === "danger" || toast.type === "error") && <AlertCircle size={16} color="#f87171" />}
             {toast.type === "warn" && <AlertCircle size={16} color="#fbbf24" />}
             {toast.type === "info" && <Info size={16} color="#60a5fa" />}
             <div style={{ flex: 1, fontSize: "13px" }}>{toast.message}</div>

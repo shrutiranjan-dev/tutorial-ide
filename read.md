@@ -92,6 +92,31 @@ npm run build
 
 Passed on 2026-06-25. Vite dev server ignores `vendor/code/**` so the vendored engine source does not trigger reload storms during GUI development.
 
+Latest OpenCode parity upgrade on 2026-06-26:
+
+- Added session-context bridge and GUI summary for active Code sessions.
+- Added engine-first VCS status/diff/stage/unstage with git fallback.
+- Added MCP connect/disconnect bridge and GUI controls inside the compact agent popover.
+- Added global config read/write bridge for `/global/config`.
+- Added compact provider/auth readiness, credential-aware connect/manage actions, MCP command insertion, skills, references, and VCS controls to the Codex-style side panel.
+- Verification passed:
+
+```bash
+npm run build
+npm run check:bridge
+git diff --check
+npm audit --audit-level=moderate
+```
+
+Steps 1-2 parity implementation on 2026-06-26:
+
+- Added `electron/opencode-client.cjs` as the typed Code engine HTTP client boundary.
+- Routed the existing main-process OpenCode fetch/query/json/unwrap helpers through that client.
+- Moved session-context, VCS, MCP connection, and global-config helper behavior onto client methods while preserving existing IPC names.
+- Added `scripts/generate-opencode-parity.cjs` and `npm run check:parity`.
+- Generated `docs/OPENCODE_PARITY_MATRIX.md` from `vendor/code/specs/v2/api.html`.
+- Latest parity count: 67 upstream operations, 15 exact route matches, 41 partial surfaces, 11 missing surfaces.
+
 ## Deprecated Learning IDE Context
 
 Everything below documents the previous learning IDE direction for historical context only. Do not revive it unless the user explicitly asks.
@@ -376,6 +401,75 @@ npm run build
 ```
 
 Both passed.
+
+Most recent checks after Code/OpenCode steps 3-5 integration:
+
+```bash
+node --check electron/main.cjs
+node --check electron/opencode-client.cjs
+npm run check:bridge
+npm run build
+npm run check:parity
+npm audit --audit-level=moderate
+git diff --check
+```
+
+All passed.
+
+Most recent checks after Code/OpenCode steps 6-9 integration:
+
+```bash
+node --check electron/main.cjs
+node --check electron/opencode-client.cjs
+node --check electron/preload.cjs
+node --check scripts/generate-opencode-parity.cjs
+npm run check:bridge
+npm run build
+npm run check:parity
+npm audit --audit-level=moderate
+git diff --check
+```
+
+All passed. Parity matrix now reports `done=27 partial=40 missing=0` across 67 upstream operations.
+
+Most recent checks after Code/OpenCode steps 10-12 integration:
+
+```bash
+node --check electron/main.cjs
+node --check electron/opencode-client.cjs
+node --check electron/preload.cjs
+node --check scripts/generate-opencode-parity.cjs
+npm run check:bridge
+npm run build
+npm run check:parity
+npm audit --audit-level=moderate
+git diff --check
+```
+
+All passed. Parity matrix now reports `done=67 partial=0 missing=0` across 67 upstream operations.
+
+Step 3-5 progress:
+
+- Composer model selection now switches the active Code session model, not just the dropdown label.
+- Selected Code agent is sent to backend prompt/session creation; sessions are keyed by project/model/permission/agent.
+- Assistant runtime keeps the real long response and no longer replaces it with a tool-count summary unless no assistant text exists.
+- Diff cards can apply available patch content through engine VCS apply routes, with local `git apply` fallback.
+- Parity matrix now reports `done=16 partial=40 missing=11` across 67 upstream operations.
+
+Step 6-9 progress:
+
+- Formatter and LSP status are exposed through engine-first adapter, IPC, preload, browser stubs, and TypeScript bridge types.
+- OpenCode FS tree/read/search/grep routes are exposed and workspace search now prefers engine grep before local fallback.
+- PTY create/list/get/update/delete routes are exposed, with local node-pty fallback for list/get/update/delete where practical.
+- Parity tooling now recognizes formatter, FS, LSP, PTY, and VCS patch/apply route families.
+- Parity matrix now reports `done=27 partial=40 missing=0` across 67 upstream operations.
+
+Step 10-12 progress:
+
+- Added exact engine route adapters for the remaining partial API families: session diff/todo/wait, config, auth, catalog, event, MCP, permission, question, VCS get, project, and workspace.
+- Added IPC/preload/type/browser coverage for the new callable surfaces.
+- Existing session, permission, event, config, question, VCS, and project/workspace flows prefer exact engine routes where practical and keep legacy/local fallbacks.
+- Parity matrix now reports `done=67 partial=0 missing=0` across 67 upstream operations.
 
 Known warning:
 

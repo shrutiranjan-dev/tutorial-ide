@@ -153,9 +153,11 @@ export const browserOpenCodeSurface = {
   config: browserConfig
 } as const;
 
+import { getItem, setItem } from "./localStore";
+
 function readJson<T>(key: string, fallback: T): T {
   try {
-    const raw = window.localStorage.getItem(key);
+    const raw = getItem(key);
     return raw ? JSON.parse(raw) as T : fallback;
   } catch {
     return fallback;
@@ -163,7 +165,7 @@ function readJson<T>(key: string, fallback: T): T {
 }
 
 function writeJson<T>(key: string, value: T) {
-  window.localStorage.setItem(key, JSON.stringify(value));
+  setItem(key, JSON.stringify(value));
 }
 
 function ensureFiles() {
@@ -333,6 +335,22 @@ export function createBrowserTutorialIde(): TutorialIdeApi {
       },
       providerCallback: async () => true,
       providerApiKey: async () => true,
+      authList: async () => ({ ok: true, source: "browser-preview", accounts: [] }),
+      authGet: async () => ({ ok: false, source: "browser-preview", error: "Auth account lookup is desktop-only in browser preview." }),
+      authCreate: async () => ({ ok: false, source: "browser-preview", error: "Auth account creation is desktop-only in browser preview." }),
+      authUpdate: async () => ({ ok: false, source: "browser-preview", error: "Auth account update is desktop-only in browser preview." }),
+      authDelete: async () => ({ ok: false, source: "browser-preview", error: "Auth account delete is desktop-only in browser preview." }),
+      authActivate: async () => ({ ok: false, source: "browser-preview", error: "Auth account activation is desktop-only in browser preview." }),
+      catalogModels: async () => ({ ok: true, source: "browser-preview", models: [] }),
+      catalogModel: async ({ providerID = "", modelID = "", model = "" }) => ({
+        ok: true,
+        source: "browser-preview",
+        model: {
+          id: modelID || model,
+          providerID,
+          name: modelID || model
+        }
+      }),
       command: async ({ prompt }) => ({
         exitCode: 0,
         stdout: [
@@ -409,6 +427,14 @@ export function createBrowserTutorialIde(): TutorialIdeApi {
       permissionList: async () => [],
       permissionReply: async () => true,
       todo: async () => [],
+      sessionContext: async () => ({
+        ok: true,
+        context: {
+          mode: "browser-preview",
+          note: "Session context is available in the desktop Code engine."
+        }
+      }),
+      sessionWait: async () => ({ ok: true, source: "browser-preview", result: { status: "idle" } }),
       diff: async () => [],
       sessionCommand: async ({ command }) => ({
         exitCode: 0,
@@ -418,6 +444,169 @@ export function createBrowserTutorialIde(): TutorialIdeApi {
       }),
       revert: async () => true,
       unrevert: async () => true,
+      sessionCompact: async () => ({ ok: true }),
+      revertStage: async () => ({ ok: true }),
+      revertClear: async () => ({ ok: true }),
+      revertCommit: async () => ({ ok: true }),
+      modelDetail: async ({ providerID, modelID }) => ({
+        ok: true,
+        model: {
+          id: modelID,
+          providerID,
+          name: modelID,
+          enabled: true,
+          status: "browser-preview"
+        }
+      }),
+      providerDetail: async ({ providerID }) => ({
+        ok: true,
+        provider: browserProviderState.all.find((provider) => provider.id === providerID) || { id: providerID, name: providerID }
+      }),
+      sessionSwitchModel: async () => ({ ok: true }),
+      sessionSwitchAgent: async () => ({ ok: true }),
+      integrations: async () => browserProviderState.all,
+      oauthAttemptPoll: async () => null,
+      oauthAttemptCancel: async () => ({ ok: true }),
+      credentials: async () => [],
+      credentialUpdate: async () => ({ ok: true }),
+      credentialDelete: async () => ({ ok: true }),
+      agents: async () => Object.values(browserConfig.agents || {}),
+      questionRequests: async () => [],
+      sessionQuestions: async () => [],
+      questionReply: async () => ({ ok: true }),
+      questionReject: async () => ({ ok: true }),
+      skills: async () => [],
+      references: async () => [],
+      savedPermissions: async () => [],
+      deleteSavedPermission: async () => ({ ok: true }),
+      health: async () => ({ healthy: false, mode: "browser-preview" }),
+      location: async () => ({ mode: "browser-preview", projectPath: browserWorkspace }),
+      readConfig: async () => ({ ok: true, config: browserConfig }),
+      writeConfig: async ({ config }) => {
+        Object.assign(browserConfig, config);
+        return { ok: true };
+      },
+      engineConfig: async () => ({ ok: true, config: browserConfig }),
+      engineConfigUpdate: async ({ config, value }) => {
+        const nextConfig = config || value;
+        if (nextConfig && typeof nextConfig === "object") Object.assign(browserConfig, nextConfig);
+        return { ok: true, source: "browser-preview", config: browserConfig };
+      },
+      engineProviderConfig: async () => ({ ok: true, config: browserProviderState }),
+      globalConfig: async (payload = { projectPath: browserWorkspace }) => {
+        const nextConfig = "config" in payload ? payload.config : "value" in payload ? payload.value : undefined;
+        if (nextConfig && typeof nextConfig === "object") Object.assign(browserConfig, nextConfig);
+        return { ok: true, config: browserConfig };
+      },
+      writeGlobalConfig: async ({ config }) => {
+        if (config && typeof config === "object") Object.assign(browserConfig, config);
+        return { ok: true, config: browserConfig };
+      },
+      readMCPConfig: async () => ({ ok: true, mcpConfig: { servers: {} } }),
+      writeMCPConfig: async () => ({ ok: true }),
+      mcpConnect: async ({ name }) => ({ ok: false, error: `${name || "MCP"} connect is desktop-only in browser preview.` }),
+      mcpDisconnect: async ({ name }) => ({ ok: false, error: `${name || "MCP"} disconnect is desktop-only in browser preview.` }),
+      mcpPromptList: async () => ({ ok: true, source: "browser-preview", prompts: [] }),
+      mcpPromptRender: async () => ({ ok: false, source: "browser-preview", error: "MCP prompt render is desktop-only in browser preview." }),
+      mcpResourceList: async () => ({ ok: true, source: "browser-preview", resources: [] }),
+      mcpResourceRead: async () => ({ ok: false, source: "browser-preview", error: "MCP resource read is desktop-only in browser preview." }),
+      mcpServerList: async () => ({ ok: true, source: "browser-preview", servers: [] }),
+      mcpServerCreate: async () => ({ ok: false, source: "browser-preview", error: "MCP server creation is desktop-only in browser preview." }),
+      mcpServerOauthStart: async () => ({ ok: false, source: "browser-preview", error: "MCP OAuth is desktop-only in browser preview." }),
+      mcpServerOauthCallback: async () => ({ ok: false, source: "browser-preview", error: "MCP OAuth is desktop-only in browser preview." }),
+      mcpServerOauthDelete: async () => ({ ok: false, source: "browser-preview", error: "MCP OAuth is desktop-only in browser preview." }),
+      formatterStatus: async () => ({
+        ok: true,
+        source: "browser-preview",
+        formatter: []
+      }),
+      lspStatus: async () => ({
+        ok: true,
+        source: "browser-preview",
+        lsp: []
+      }),
+      fsTree: async () => ({
+        ok: true,
+        source: "browser-preview",
+        nodes: fileNodesFromFiles(ensureFiles())
+      }),
+      fsFile: async ({ path = "", file = "" }) => {
+        const relativePath = path || file;
+        return {
+          ok: true,
+          source: "browser-preview",
+          path: relativePath,
+          content: ensureFiles()[relativePath] || ""
+        };
+      },
+      fsSearch: async ({ query = "", limit = 100 }) => {
+        const needle = query.toLowerCase();
+        const results = Object.keys(ensureFiles())
+          .filter((filePath) => !needle || filePath.toLowerCase().includes(needle))
+          .slice(0, limit)
+          .map((filePath) => ({ path: filePath, line: 1, column: 1, preview: filePath }));
+        return { ok: true, source: "browser-preview", results };
+      },
+      fsGrep: async ({ pattern = "", query = "", limit = 100 }) => {
+        const needle = String(pattern || query).toLowerCase();
+        const results = Object.entries(ensureFiles()).flatMap(([filePath, content]) =>
+          content.split(/\r?\n/).flatMap((line, index) => {
+            const column = needle ? line.toLowerCase().indexOf(needle) : -1;
+            if (needle && column === -1) return [];
+            return [{ path: filePath, line: index + 1, column: Math.max(1, column + 1), preview: line.trim() }];
+          })
+        ).slice(0, limit);
+        return { ok: true, source: "browser-preview", results };
+      },
+      vcsGet: async () => ({ ok: true, source: "browser-preview", status: [], changes: [] }),
+      vcsStatus: async () => ({ ok: true, status: { ok: false, message: "VCS is desktop-only in browser preview.", changes: [] } }),
+      vcsDiff: async () => ({ ok: true, diff: "VCS diff is desktop-only in browser preview." }),
+      vcsStage: async () => ({ ok: false, error: "VCS stage is desktop-only in browser preview." }),
+      vcsUnstage: async () => ({ ok: false, error: "VCS unstage is desktop-only in browser preview." }),
+      vcsPatch: async () => ({ ok: false, error: "VCS patch apply is desktop-only in browser preview." }),
+      vcsApply: async () => ({ ok: false, error: "VCS patch apply is desktop-only in browser preview." }),
+      ptyCreate: async () => ({
+        ok: false,
+        source: "browser-preview",
+        error: "PTY creation is desktop-only in browser preview."
+      }),
+      ptyList: async () => ({ ok: true, source: "browser-preview", ptys: [] }),
+      ptyGet: async () => ({
+        ok: false,
+        source: "browser-preview",
+        error: "PTY lookup is desktop-only in browser preview."
+      }),
+      ptyUpdate: async () => ({
+        ok: false,
+        source: "browser-preview",
+        error: "PTY resize/update is desktop-only in browser preview."
+      }),
+      ptyDelete: async () => ({
+        ok: false,
+        source: "browser-preview",
+        error: "PTY delete is desktop-only in browser preview."
+      }),
+      copyProject: async () => ({ ok: false, error: "Project copy is desktop-only in browser preview." }),
+      listProjects: async () => ({ ok: true, projects: [browserWorkspace] }),
+      projectList: async () => ({ ok: true, source: "browser-preview", projects: [browserWorkspace] }),
+      projectGet: async () => ({ ok: true, source: "browser-preview", project: { path: browserWorkspace } }),
+      projectUpdate: async () => ({ ok: false, source: "browser-preview", error: "Project update is desktop-only in browser preview." }),
+      workspaceList: async () => ({ ok: true, source: "browser-preview", workspaces: [browserWorkspace] }),
+      workspaceGet: async () => ({ ok: true, source: "browser-preview", workspace: { path: browserWorkspace } }),
+      workspaceCreate: async () => ({ ok: false, source: "browser-preview", error: "Workspace creation is desktop-only in browser preview." }),
+      workspaceUpdate: async () => ({ ok: false, source: "browser-preview", error: "Workspace update is desktop-only in browser preview." }),
+      workspaceDelete: async () => ({ ok: false, source: "browser-preview", error: "Workspace delete is desktop-only in browser preview." }),
+      workspaceStatus: async () => ({ ok: true, source: "browser-preview", status: { path: browserWorkspace } }),
+      workspaceSync: async () => ({ ok: false, source: "browser-preview", error: "Workspace sync is desktop-only in browser preview." }),
+      workspaceWarp: async () => ({ ok: false, source: "browser-preview", error: "Workspace warp is desktop-only in browser preview." }),
+      cli: async ({ args }) => ({
+        ok: true,
+        exitCode: 0,
+        stdout: `Code CLI is desktop-only in browser preview. Args: ${args.join(" ")}`,
+        stderr: "",
+        command: "code " + args.join(" ")
+      }),
+      mcpIntegrations: async () => ({ ok: true, integrations: [] }),
       onEvent: () => () => undefined
     },
     lessons: {
@@ -479,6 +668,19 @@ export function createBrowserTutorialIde(): TutorialIdeApi {
     files: {
       list: async () => fileNodesFromFiles(ensureFiles()),
       read: async (_workspacePath, relativePath) => ensureFiles()[relativePath] || "",
+      readRange: async (_workspacePath, relativePath, offset = 0, length = 64 * 1024) => {
+        const content = ensureFiles()[relativePath] || "";
+        const start = Math.max(0, offset);
+        const size = Math.max(1, length);
+        const slice = content.slice(start, start + size);
+        return {
+          content: slice,
+          offset: start,
+          bytesRead: slice.length,
+          size: content.length,
+          eof: start + slice.length >= content.length
+        };
+      },
       write: async (_workspacePath, relativePath, content) => {
         const files = ensureFiles();
         files[relativePath] = content;

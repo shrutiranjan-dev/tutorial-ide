@@ -4,6 +4,7 @@ const fs = require("fs");
 const fsp = require("fs/promises");
 const os = require("os");
 const { exec, spawn } = require("child_process");
+const { createCodeEngineClient } = require("./opencode-client.cjs");
 
 const logger = {
   log: (...args) => console.log(`[LOG] ${new Date().toISOString()} ${args.join(" ")}`),
@@ -30,6 +31,9 @@ const openCodeSyncedDirectories = new Set();
 const openCodeEventStreams = new Map();
 let openCodeServer = null;
 let openCodeServerStarting = null;
+let openCodeClient = null;
+const MAX_EDITOR_FILE_BYTES = 2 * 1024 * 1024;
+const BINARY_SAMPLE_BYTES = 4096;
 
 const codeWorkbenchIdentity = [
   "You are Code, the AI coding agent inside Code Workbench.",
@@ -108,6 +112,39 @@ function safeJoin(base, relativePath = "") {
     throw new Error("Path is outside of the workspace.");
   }
   return target;
+}
+
+function looksBinaryBuffer(buffer) {
+  if (!buffer || buffer.length === 0) return false;
+  let nonPrintable = 0;
+  for (const byte of buffer) {
+    if (byte === 0) return true;
+    if (byte < 9 || (byte > 13 && byte < 32)) nonPrintable += 1;
+  }
+  return nonPrintable / buffer.length > 0.3;
+}
+
+async function assertEditorReadableFile(filePath) {
+  const stat = await fsp.stat(filePath);
+  if (!stat.isFile()) throw new Error("Only files can be opened in the editor.");
+  if (stat.size > MAX_EDITOR_FILE_BYTES) {
+    const sizeMb = (stat.size / (1024 * 1024)).toFixed(1);
+    const limitMb = (MAX_EDITOR_FILE_BYTES / (1024 * 1024)).toFixed(0);
+    throw new Error(`This file is ${sizeMb} MB. Code Workbench keeps files above ${limitMb} MB out of the editor for stability. Ask Code to inspect it with the read tool, or narrow the file manually.`);
+  }
+  const handle = await fsp.open(filePath, "r");
+  try {
+    const sample = Buffer.alloc(Math.min(BINARY_SAMPLE_BYTES, stat.size));
+    if (sample.length) {
+      await handle.read(sample, 0, sample.length, 0);
+      if (looksBinaryBuffer(sample)) {
+        throw new Error("This looks like a binary file, so it was not opened in the text editor.");
+      }
+    }
+  } finally {
+    await handle.close();
+  }
+  return stat;
 }
 
 async function readJson(filePath, fallback) {
@@ -197,47 +234,27 @@ function normalizeAgentModel(model = "") {
 }
 
 function openCodeDirectoryQuery(projectPath) {
-  return `directory=${encodeURIComponent(path.resolve(projectPath || rootDir))}`;
+  return getOpenCodeClient().directoryQuery(projectPath);
 }
 
 function openCodeQuery(projectPath, params = {}) {
-  const query = new URLSearchParams();
-  query.set("directory", path.resolve(projectPath || rootDir));
-  for (const [key, value] of Object.entries(params || {})) {
-    if (value === undefined || value === null || value === "") continue;
-    query.set(key, String(value));
-  }
-  return query.toString();
+  return getOpenCodeClient().query(projectPath, params);
 }
 
 function openCodeJsonOptions(method, body) {
-  return {
-    method,
-    headers: { "Content-Type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  };
+  return getOpenCodeClient().json(method, body);
 }
 
 async function openCodeFetchFirst(candidates) {
-  let lastError;
-  for (const candidate of candidates) {
-    try {
-      return await openCodeFetch(candidate.route, candidate.options || {});
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError || new Error("No Code engine endpoint candidates were provided.");
+  return getOpenCodeClient().first(candidates);
 }
 
 function unwrapOpenCodeData(value) {
-  if (value && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, "data")) return value.data;
-  return value;
+  return getOpenCodeClient().unwrapData(value);
 }
 
 function openCodeArray(value) {
-  const data = unwrapOpenCodeData(value);
-  return Array.isArray(data) ? data : [];
+  return getOpenCodeClient().asArray(value);
 }
 
 function openCodeModelForInstance(modelSpec) {
@@ -307,7 +324,17 @@ function ensureOpenCodeServer() {
       resolve(openCodeServer);
     };
 
-    const handleOutput = (chunk) => {
+    const checkHealth = async (url) => {
+      try {
+        const res = await fetch(`${url}/health`);
+        if (res.ok) return true;
+      } catch {
+        return false;
+      }
+      return false;
+    };
+
+    const handleOutput = async (chunk) => {
       const text = String(chunk || "");
       buffer += text;
       for (const line of text.split(/\r?\n/).filter(Boolean)) {
@@ -316,7 +343,12 @@ function ensureOpenCodeServer() {
       const match =
         buffer.match(/opencode server listening.*on\s+(https?:\/\/[^\s]+)/i) ||
         buffer.match(/(https?:\/\/127\.0\.0\.1:\d+)/);
-      if (match?.[1]) resolveWithUrl(match[1].replace(/[.,;]+$/, ""));
+      if (match?.[1]) {
+        const url = match[1].replace(/[.,;]+$/, "");
+        if (await checkHealth(url)) {
+          resolveWithUrl(url);
+        }
+      }
     };
 
     proc.stdout?.on("data", handleOutput);
@@ -345,19 +377,18 @@ function ensureOpenCodeServer() {
   return openCodeServerStarting;
 }
 
+function getOpenCodeClient() {
+  if (!openCodeClient) {
+    openCodeClient = createCodeEngineClient({
+      rootDir,
+      ensureServer: ensureOpenCodeServer
+    });
+  }
+  return openCodeClient;
+}
+
 async function openCodeFetch(route, options = {}) {
-  const server = await ensureOpenCodeServer();
-  const response = await fetch(`${server.url}${route}`, options);
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`Code server returned ${response.status} for ${route}.\n${text.slice(0, 3000)}`);
-  }
-  if (!text.trim()) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
+  return getOpenCodeClient().request(route, options);
 }
 
 async function ensureOpenCodeSync(projectPath) {
@@ -401,22 +432,55 @@ function permissionRulesForMode(mode = "full") {
   });
 }
 
-function openCodeSessionKey(projectPath, modelSpec, permissionMode = "full") {
-  return `${path.resolve(projectPath || rootDir)}::${modelSpec.providerID}/${modelSpec.modelID}::${permissionMode}`;
+function normalizePermissionRules(rules, mode = "full") {
+  if (!Array.isArray(rules) || !rules.length) return permissionRulesForMode(mode);
+  return rules.map((rule) => {
+    const item = rule && typeof rule === "object" ? rule : {};
+    const rawAction = String(item.action || "").toLowerCase();
+    const rawEffect = ["allow", "ask", "deny"].includes(rawAction)
+      ? rawAction
+      : String(item.effect || item.mode || item.value || item.actionEffect || "allow").toLowerCase();
+    const permission = String(item.permission || item.tool || item.name || item.action || "*").trim() || "*";
+    const normalizedEffect = rawEffect.includes("deny")
+      ? "deny"
+      : rawEffect.includes("ask") || rawEffect.includes("prompt")
+        ? "ask"
+        : "allow";
+    return {
+      permission,
+      pattern: String(item.pattern || item.resource || item.path || "*").trim() || "*",
+      action: normalizedEffect,
+      description: item.description ? String(item.description) : undefined
+    };
+  });
 }
 
-async function createOpenCodeSession(projectPath, modelSpec, permissionMode = "full") {
+function permissionRuleSignature(rules) {
+  return JSON.stringify(normalizePermissionRules(rules).map((rule) => [
+    rule.permission,
+    rule.pattern,
+    rule.action
+  ]));
+}
+
+function openCodeSessionKey(projectPath, modelSpec, permissionMode = "full", agent = "build", permissionRules) {
+  const permissionKey = permissionRules ? permissionRuleSignature(permissionRules) : permissionMode;
+  return `${path.resolve(projectPath || rootDir)}::${modelSpec.providerID}/${modelSpec.modelID}::${permissionKey}::${agent || "build"}`;
+}
+
+async function createOpenCodeSession(projectPath, modelSpec, permissionMode = "full", agent = "build", permissionRules) {
   const directory = path.resolve(projectPath || rootDir);
+  const permission = normalizePermissionRules(permissionRules, permissionMode);
   const instanceBody = {
-    agent: "build",
+    agent: agent || "build",
     title: "Code Workbench",
     model: openCodeModelForInstance(modelSpec),
-    permission: permissionRulesForMode(permissionMode)
+    permission
   };
   const protocolBody = {
-    agent: "build",
+    agent: agent || "build",
     model: openCodeModelRef(modelSpec),
-    permission: permissionRulesForMode(permissionMode),
+    permission,
     location: {
       directory
     }
@@ -434,12 +498,18 @@ async function createOpenCodeSession(projectPath, modelSpec, permissionMode = "f
 
 async function createOpenCodeSessionFromPayload(projectPath, payload = {}) {
   const modelSpec = normalizeAgentModel(payload.model || payload.modelRef || payload.modelID || "");
-  if (modelSpec) return createOpenCodeSession(projectPath, modelSpec, payload.permissionMode || payload.mode || "full");
+  if (modelSpec) return createOpenCodeSession(
+    projectPath,
+    modelSpec,
+    payload.permissionMode || payload.mode || "full",
+    payload.agent || "build",
+    payload.permissionRules || payload.permission || payload.permissions
+  );
   const body = {
     title: payload.title || "Code Workbench",
     agent: payload.agent || "build",
     metadata: payload.metadata || undefined,
-    permission: payload.permission || permissionRulesForMode(payload.permissionMode || "full"),
+    permission: normalizePermissionRules(payload.permissionRules || payload.permission || payload.permissions, payload.permissionMode || "full"),
     workspaceID: payload.workspaceID || undefined
   };
   const data = await openCodeFetchFirst([
@@ -458,9 +528,9 @@ async function createOpenCodeSessionFromPayload(projectPath, payload = {}) {
   throw new Error("Code server did not return a session id.");
 }
 
-async function ensureOpenCodeSession(projectPath, modelSpec, permissionMode = "full") {
+async function ensureOpenCodeSession(projectPath, modelSpec, permissionMode = "full", agent = "build", permissionRules) {
   await ensureOpenCodeSync(projectPath);
-  const key = openCodeSessionKey(projectPath, modelSpec, permissionMode);
+  const key = openCodeSessionKey(projectPath, modelSpec, permissionMode, agent, permissionRules);
   const existing = openCodeSessions.get(key);
   if (existing?.id) {
     const statusMap = await readOpenCodeSessionStatus(projectPath).catch(() => ({}));
@@ -468,18 +538,23 @@ async function ensureOpenCodeSession(projectPath, modelSpec, permissionMode = "f
     if (status !== "busy") return existing;
     openCodeSessions.delete(key);
   }
-  const session = await createOpenCodeSession(projectPath, modelSpec, permissionMode);
-  const value = { id: session.id, model: modelSpec, directory: projectPath || rootDir, permissionMode };
+  const session = await createOpenCodeSession(projectPath, modelSpec, permissionMode, agent, permissionRules);
+  const value = { id: session.id, model: modelSpec, directory: projectPath || rootDir, permissionMode, agent, permission: normalizePermissionRules(permissionRules, permissionMode) };
   openCodeSessions.set(key, value);
   return value;
 }
 
-async function readOpenCodeMessages(sessionID, projectPath) {
+function createOpenCodeMessageId() {
+  return `msg_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+async function readOpenCodeMessages(sessionID, projectPath, options = {}) {
   if (!sessionID) return [];
+  const limit = Math.max(1, Math.min(Number(options.limit || 240), 1000));
   const id = encodeURIComponent(sessionID);
   const data = await openCodeFetchFirst([
-    { route: `/session/${id}/message?${openCodeQuery(projectPath, { limit: 80 })}` },
-    { route: `/api/session/${id}/message?${openCodeQuery(projectPath, { limit: 80, order: "asc" })}` }
+    { route: `/session/${id}/message?${openCodeQuery(projectPath, { limit })}` },
+    { route: `/api/session/${id}/message?${openCodeQuery(projectPath, { limit, order: "asc" })}` }
   ]);
   return openCodeArray(data);
 }
@@ -545,6 +620,10 @@ function openCodeMessageRole(message) {
   return message?.info?.role || message?.role || message?.message?.role || "";
 }
 
+function openCodeMessageId(message) {
+  return message?.info?.id || message?.id || message?.message?.id || "";
+}
+
 function openCodePartText(part) {
   if (!part || typeof part !== "object") return "";
   const nested = part.part && typeof part.part === "object" ? openCodePartText(part.part) : "";
@@ -560,9 +639,23 @@ function openCodePartText(part) {
   return "";
 }
 
-function latestAssistantText(messages, previousAssistantCount) {
+function assistantMessagesAfterTurn(messages, previousAssistantCount = 0, turnMessageID = "") {
   const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
-  const candidates = assistants.slice(previousAssistantCount);
+  if (turnMessageID) {
+    const turnIndex = messages.findIndex((message) => openCodeMessageId(message) === turnMessageID);
+    if (turnIndex !== -1) {
+      const candidates = messages
+        .slice(turnIndex + 1)
+        .filter((message) => openCodeMessageRole(message) === "assistant");
+      if (candidates.length) return candidates;
+    }
+  }
+  return assistants.slice(previousAssistantCount);
+}
+
+function latestAssistantText(messages, previousAssistantCount, turnMessageID = "") {
+  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
+  const candidates = assistantMessagesAfterTurn(messages, previousAssistantCount, turnMessageID);
   const latest = candidates.at(-1) || assistants.at(-1);
   if (!latest) return "";
   return (latest.parts || [])
@@ -572,18 +665,17 @@ function latestAssistantText(messages, previousAssistantCount) {
     .trim();
 }
 
-function bestAssistantText(messages, previousAssistantCount) {
-  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
-  const candidates = assistants.slice(previousAssistantCount);
+function bestAssistantText(messages, previousAssistantCount, turnMessageID = "") {
+  const candidates = assistantMessagesAfterTurn(messages, previousAssistantCount, turnMessageID);
   return candidates
     .map((message) => (message.parts || []).map(openCodePartText).filter(Boolean).join("\n").trim())
     .filter(Boolean)
-    .sort((a, b) => b.length - a.length)[0] || latestAssistantText(messages, previousAssistantCount);
+    .at(-1) || latestAssistantText(messages, previousAssistantCount, turnMessageID);
 }
 
-function latestAssistantMessage(messages, previousAssistantCount = 0) {
+function latestAssistantMessage(messages, previousAssistantCount = 0, turnMessageID = "") {
   const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
-  const candidates = assistants.slice(previousAssistantCount);
+  const candidates = assistantMessagesAfterTurn(messages, previousAssistantCount, turnMessageID);
   return candidates.at(-1) || assistants.at(-1) || null;
 }
 
@@ -619,16 +711,26 @@ function summarizeOpenCodePart(part) {
   if (!part || typeof part !== "object") return null;
   if (part.part && typeof part.part === "object") return summarizeOpenCodePart(part.part);
   if (["text", "reasoning", "patch", "step-start", "step-finish"].includes(part.type)) return null;
-  if (part.type === "tool" && ["todowrite"].includes(String(part.tool || part.name || ""))) return null;
-  if (part.type === "tool" && String(part.tool || part.name || "") === "question" && ["pending", "running"].includes(String(part.status || part.state || ""))) return null;
+  const state = part.state && typeof part.state === "object" ? part.state : {};
+  const input = part.input && typeof part.input === "object" ? part.input : state.input && typeof state.input === "object" ? state.input : {};
+  const output = part.output && typeof part.output === "object" ? part.output : state.output && typeof state.output === "object" ? state.output : {};
+  const metadata = part.metadata && typeof part.metadata === "object" ? part.metadata : state.metadata && typeof state.metadata === "object" ? state.metadata : {};
+  const time = part.time && typeof part.time === "object" ? part.time : state.time && typeof state.time === "object" ? state.time : undefined;
+  const toolName = String(part.tool || part.name || part.toolID || part.toolName || "");
+  const status = safeOpenCodeText(state.status || part.status || part.phase || "");
+  if (part.type === "tool" && ["todowrite"].includes(toolName)) return null;
+  if (part.type === "tool" && toolName === "question" && ["pending", "running"].includes(status)) return null;
   const title =
+    state.title ||
     part.title ||
     part.name ||
     part.tool ||
-    part.input?.filePath ||
-    part.input?.path ||
-    part.input?.command ||
-    part.input?.query ||
+    input.filePath ||
+    input.path ||
+    input.command ||
+    input.query ||
+    metadata.filepath ||
+    metadata.path ||
     part.command ||
     part.filename ||
     part.file ||
@@ -637,33 +739,66 @@ function summarizeOpenCodePart(part) {
   const detail =
     part.text ||
     part.content ||
+    (typeof state.output === "string" ? state.output : "") ||
     part.output ||
     part.error ||
-    part.metadata?.filediff ||
-    part.input?.content ||
-    part.input?.command ||
-    part.input?.query ||
+    metadata.preview ||
+    metadata.filediff ||
+    output.stdout ||
+    output.stderr ||
+    output.text ||
+    output.content ||
+    output.result ||
+    input.content ||
+    input.command ||
+    input.query ||
     part.path ||
     part.url ||
     part.command ||
     "";
   const titleText = safeOpenCodeText(title, "Code step");
-  const typeText = safeOpenCodeText(part.tool || part.name || part.type || "part", "part");
+  const typeText = safeOpenCodeText(part.tool || part.name || part.toolID || part.type || "part", "part");
+  const raw = {
+    ...part,
+    input,
+    output: Object.keys(output).length ? output : state.output,
+    metadata,
+    time,
+    state,
+    status,
+    title: titleText,
+    outputPath: part.outputPath || metadata.outputPath || output.outputPath
+  };
   return {
     id: safeOpenCodeText(part.id, `${typeText}-${titleText}`),
     type: typeText,
     title: titleText,
-    status: safeOpenCodeText(part.status || part.state || part.phase || ""),
+    status,
     detail: safeOpenCodeText(detail).slice(0, 4000),
-    raw: part
+    raw
   };
 }
 
-function collectOpenCodeTools(messages, previousAssistantCount = 0) {
-  const assistants = messages.filter((message) => openCodeMessageRole(message) === "assistant");
-  return assistants
-    .slice(previousAssistantCount)
+function collectOpenCodeTools(messages, previousAssistantCount = 0, turnMessageID = "") {
+  return assistantMessagesAfterTurn(messages, previousAssistantCount, turnMessageID)
     .flatMap((message) => (message.parts || []).map(summarizeOpenCodePart).filter(Boolean));
+}
+
+function openCodeEventSessionID(properties = {}) {
+  return properties.sessionID || properties.session?.id || properties.session?.sessionID || properties.message?.sessionID || "";
+}
+
+function openCodeEventMessageID(properties = {}) {
+  return properties.messageID || properties.message?.id || properties.part?.messageID || "";
+}
+
+function openCodeEventQuestion(properties = {}) {
+  return properties.request || properties.question || properties.prompt || properties;
+}
+
+function openCodeEventTodos(properties = {}) {
+  const todos = properties.todos || properties.todo || properties.items || properties.list || properties.part?.todos || properties.part?.input?.todos;
+  return Array.isArray(todos) ? todos : todos ? [todos] : [];
 }
 
 function emitAgentEvent(sender, requestId, event) {
@@ -676,11 +811,16 @@ function emitAgentEvent(sender, requestId, event) {
 }
 
 async function streamOpenCodeEvents(sender, requestId, sessionID, projectPath, controller) {
-  const server = await ensureOpenCodeServer();
-  const response = await fetch(`${server.url}/event?${openCodeQuery(projectPath)}`, {
-    signal: controller.signal,
-    headers: { Accept: "text/event-stream" }
-  });
+  let response;
+  try {
+    response = await getOpenCodeClient().events.subscribe(projectPath, { signal: controller.signal });
+  } catch {
+    const server = await ensureOpenCodeServer();
+    response = await fetch(`${server.url}/event?${openCodeQuery(projectPath)}`, {
+      signal: controller.signal,
+      headers: { Accept: "text/event-stream" }
+    });
+  }
   if (!response.ok || !response.body) return;
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -702,36 +842,77 @@ async function streamOpenCodeEvents(sender, requestId, sessionID, projectPath, c
     }
     const type = event.type || "";
     const properties = event.properties || event.data || {};
-    if (sessionID && properties.sessionID && properties.sessionID !== sessionID) return;
+    const eventSessionID = openCodeEventSessionID(properties) || sessionID;
+    if (sessionID && eventSessionID && eventSessionID !== sessionID) return;
 
     if (type === "message.part.delta" && properties.field === "text") {
       const partID = properties.partID || "assistant";
       const next = `${textByPart.get(partID) || ""}${properties.delta || ""}`;
       textByPart.set(partID, next);
-      emitAgentEvent(sender, requestId, { type: "text", sessionID, text: Array.from(textByPart.values()).join("\n") });
+      emitAgentEvent(sender, requestId, { type: "text", sessionID: eventSessionID, messageID: openCodeEventMessageID(properties), text: Array.from(textByPart.values()).join("\n") });
       return;
     }
 
     if (type === "permission.asked" || type === "permission.v2.asked") {
       emitAgentEvent(sender, requestId, {
         type: "permissions",
-        sessionID,
+        sessionID: eventSessionID,
         permissions: [properties.request || properties.permission || properties]
       });
       return;
     }
 
+    if (type === "permission.replied" || type === "permission.v2.replied") {
+      emitAgentEvent(sender, requestId, {
+        type: "permission.replied",
+        sessionID: eventSessionID,
+        permissionID: properties.permissionID || properties.requestID || properties.id,
+        reply: properties.reply || properties.response || properties.status || ""
+      });
+      return;
+    }
+
+    if (type === "question.asked" || type === "question.requested") {
+      const question = openCodeEventQuestion(properties);
+      emitAgentEvent(sender, requestId, {
+        type: "question.asked",
+        sessionID: eventSessionID,
+        questionID: question.id || question.requestID || properties.questionID || properties.id,
+        question
+      });
+      return;
+    }
+
+    if (type === "question.replied" || type === "question.rejected") {
+      emitAgentEvent(sender, requestId, {
+        type: "question.replied",
+        sessionID: eventSessionID,
+        questionID: properties.questionID || properties.requestID || properties.id,
+        status: type.endsWith("rejected") ? "rejected" : "replied"
+      });
+      return;
+    }
+
     if (type === "session.diff" && Array.isArray(properties.diff)) {
-      emitAgentEvent(sender, requestId, { type: "diff", sessionID, diff: properties.diff });
+      emitAgentEvent(sender, requestId, { type: "diff", sessionID: eventSessionID, messageID: openCodeEventMessageID(properties), diff: properties.diff });
       return;
     }
 
     if (type === "file.watcher.updated") {
       emitAgentEvent(sender, requestId, {
         type: "files",
-        sessionID,
+        sessionID: eventSessionID,
         file: properties.file,
         event: properties.event || "change"
+      });
+      return;
+    }
+
+    if (type === "session.todo" || type === "todo.updated" || type === "message.todo.updated") {
+      emitAgentEvent(sender, requestId, {
+        type: "todo",
+        sessionID: eventSessionID,
+        todos: openCodeEventTodos(properties)
       });
       return;
     }
@@ -740,7 +921,7 @@ async function streamOpenCodeEvents(sender, requestId, sessionID, projectPath, c
       const summary = summarizeOpenCodePart(properties.part);
       if (summary) {
         toolsByPart.set(summary.id, summary);
-        emitAgentEvent(sender, requestId, { type: "tools", sessionID, tools: Array.from(toolsByPart.values()) });
+        emitAgentEvent(sender, requestId, { type: "tools", sessionID: eventSessionID, messageID: openCodeEventMessageID(properties), tools: Array.from(toolsByPart.values()) });
       }
       return;
     }
@@ -748,10 +929,32 @@ async function streamOpenCodeEvents(sender, requestId, sessionID, projectPath, c
     if (type === "session.status" && properties.status?.type) {
       emitAgentEvent(sender, requestId, {
         type: "status",
+        sessionID: eventSessionID,
         status: properties.status.type,
         message: properties.status.type === "busy" ? "Code is working..." : "Code is idle."
       });
+      return;
     }
+
+    if (type === "message.completed" || type === "message.done") {
+      emitAgentEvent(sender, requestId, {
+        type: "message.done",
+        sessionID: eventSessionID,
+        messageID: openCodeEventMessageID(properties)
+      });
+      return;
+    }
+
+    if (type === "message.updated") {
+      return;
+    }
+
+    emitAgentEvent(sender, requestId, {
+      type,
+      sessionID: eventSessionID || undefined,
+      event: type,
+      data: properties
+    });
   };
 
   while (!controller.signal.aborted) {
@@ -863,6 +1066,17 @@ async function saveOpenCodeProviderApiKey(providerID, key, projectPath) {
 
 async function readOpenCodePermissions(sessionID, projectPath) {
   const query = openCodeQuery(projectPath);
+  try {
+    const result = await getOpenCodeClient().permission.list(projectPath, { sessionID });
+    const permissions = openCodeArray(result.permissions || result.raw || result);
+    if (permissions.length || result.ok) {
+      return sessionID
+        ? permissions.filter((item) => !item.sessionID || item.sessionID === sessionID)
+        : permissions;
+    }
+  } catch {
+    // Fall back to legacy routes below.
+  }
   if (!sessionID) {
     try {
       return openCodeArray(await openCodeFetch(`/permission?${query}`));
@@ -892,6 +1106,12 @@ async function replyOpenCodePermission(sessionID, requestID, reply, projectPath,
   if (!requestID) return false;
   const body = { reply, message: message || undefined };
   try {
+    const result = await getOpenCodeClient().permission.reply(projectPath, requestID, body);
+    if (result.ok) return true;
+  } catch {
+    // Fall back to legacy/session routes below.
+  }
+  try {
     await openCodeFetch(
       `/permission/${encodeURIComponent(requestID)}/reply?${openCodeQuery(projectPath)}`,
       openCodeJsonOptions("POST", body)
@@ -909,10 +1129,9 @@ async function replyOpenCodePermission(sessionID, requestID, reply, projectPath,
 
 async function readOpenCodeDiff(sessionID, projectPath, messageID) {
   if (!sessionID) return [];
-  const suffix = openCodeQuery(projectPath, { messageID });
   try {
-    const data = await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/diff?${suffix}`);
-    return openCodeArray(data);
+    const result = await getOpenCodeClient().session.diff(sessionID, projectPath, { messageID });
+    return openCodeArray(result.diff || result.raw || result);
   } catch {
     return [];
   }
@@ -920,8 +1139,284 @@ async function readOpenCodeDiff(sessionID, projectPath, messageID) {
 
 async function readOpenCodeTodo(sessionID, projectPath) {
   if (!sessionID) return [];
-  const data = await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/todo?${openCodeQuery(projectPath)}`);
-  return openCodeArray(data);
+  try {
+    const result = await getOpenCodeClient().session.todo(sessionID, projectPath);
+    return openCodeArray(result.todos || result.raw || result);
+  } catch {
+    const data = await openCodeFetch(`/session/${encodeURIComponent(sessionID)}/todo?${openCodeQuery(projectPath)}`);
+    return openCodeArray(data);
+  }
+}
+
+async function readOpenCodeSessionContext(sessionID, projectPath) {
+  return getOpenCodeClient().session.context(sessionID, projectPath);
+}
+
+async function readOpenCodeVcsStatus(projectPath) {
+  try {
+    return await getOpenCodeClient().vcs.status(projectPath);
+  } catch (error) {
+    const git = await gitStatus(projectPath || rootDir);
+    return {
+      ok: git.ok,
+      source: "git",
+      branch: git.branch,
+      status: gitStatusFromPorcelain(git.changes.map((change) => `${change.status.padEnd(2)} ${change.path}`).join("\n")),
+      changes: git.changes,
+      message: git.message,
+      error: git.ok ? undefined : (error instanceof Error ? error.message : String(error))
+    };
+  }
+}
+
+async function readOpenCodeVcsDiff(projectPath, payload = {}) {
+  try {
+    return await getOpenCodeClient().vcs.diff(projectPath, payload);
+  } catch (error) {
+    const paths = vcsPathsFromPayload(payload);
+    const args = ["diff"];
+    if (payload.staged || payload.cached) args.push("--cached");
+    if (paths.length) args.push("--", ...paths);
+    const result = await runGitArgs(projectPath || rootDir, args);
+    return {
+      ok: result.exitCode === 0,
+      source: "git",
+      patch: result.stdout || "",
+      diff: result.stdout || "",
+      command: result.command,
+      error: result.exitCode === 0 ? undefined : (result.stderr || (error instanceof Error ? error.message : String(error)))
+    };
+  }
+}
+
+async function changeOpenCodeVcsStage(projectPath, payload = {}, staged = true) {
+  const files = vcsPathsFromPayload(payload);
+  try {
+    return await getOpenCodeClient().vcs.stage(projectPath, { ...payload, files }, staged);
+  } catch (error) {
+    const args = staged
+      ? (files.length ? ["add", "--", ...files] : ["add", "-A"])
+      : (files.length ? ["restore", "--staged", "--", ...files] : ["restore", "--staged", "."]);
+    let result = await runGitArgs(projectPath || rootDir, args);
+    if (!staged && result.exitCode !== 0) {
+      result = await runGitArgs(projectPath || rootDir, files.length ? ["reset", "HEAD", "--", ...files] : ["reset"]);
+    }
+    return {
+      ok: result.exitCode === 0,
+      source: "git",
+      command: result.command,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      error: result.exitCode === 0 ? undefined : (result.stderr || (error instanceof Error ? error.message : String(error)))
+    };
+  }
+}
+
+async function applyOpenCodeVcsPatch(projectPath, payload = {}) {
+  const patch = String(payload.patch || payload.diff || "");
+  if (!patch.trim()) {
+    return { ok: false, source: "git", error: "No patch content provided." };
+  }
+  try {
+    return await getOpenCodeClient().vcs.applyPatch(projectPath, payload);
+  } catch (error) {
+    const workspace = projectPath || rootDir;
+    const tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "code-workbench-patch-"));
+    const patchPath = path.join(tempDir, "change.patch");
+    try {
+      await fsp.writeFile(patchPath, patch, "utf8");
+      const args = ["apply", "--whitespace=nowarn"];
+      if (payload.check || payload.dryRun) args.push("--check");
+      args.push(patchPath);
+      const result = await runGitArgs(workspace, args);
+      return {
+        ok: result.exitCode === 0,
+        source: "git",
+        command: result.command,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        error: result.exitCode === 0 ? undefined : (result.stderr || (error instanceof Error ? error.message : String(error)))
+      };
+    } finally {
+      await fsp.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+}
+
+function engineResultArray(value) {
+  const data = unwrapOpenCodeData(value);
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.results)) return data.results;
+  if (Array.isArray(data?.files)) return data.files;
+  if (Array.isArray(data?.matches)) return data.matches;
+  if (Array.isArray(data?.tree)) return data.tree;
+  if (Array.isArray(data?.ptys)) return data.ptys;
+  if (Array.isArray(data?.terminals)) return data.terminals;
+  return [];
+}
+
+function normalizeEngineSearchResult(item, index = 0) {
+  if (typeof item === "string") {
+    return { path: item, line: 1, column: 1, preview: item };
+  }
+  const pathValue = item?.path || item?.file || item?.filename || item?.name || `result-${index + 1}`;
+  const lineValue = item?.line || item?.lineNumber || item?.start?.line || item?.range?.start?.line || 1;
+  const columnValue = item?.column || item?.col || item?.start?.column || item?.range?.start?.column || 1;
+  const preview = item?.preview || item?.text || item?.lineText || item?.content || pathValue;
+  return {
+    path: String(pathValue),
+    line: Number(lineValue) || 1,
+    column: Number(columnValue) || 1,
+    preview: String(preview).trim().slice(0, 500)
+  };
+}
+
+function normalizeEngineTreeNode(item, basePath = "") {
+  if (!item || typeof item !== "object") return null;
+  const name = String(item.name || item.basename || path.basename(String(item.path || basePath || "")) || "item");
+  const rawPath = String(item.path || item.file || path.join(basePath, name));
+  const type = item.type === "directory" || item.kind === "directory" || item.isDirectory || Array.isArray(item.children)
+    ? "directory"
+    : "file";
+  const children = Array.isArray(item.children)
+    ? item.children.map((child) => normalizeEngineTreeNode(child, rawPath)).filter(Boolean)
+    : [];
+  return { name, path: rawPath.replace(/\\/g, "/"), type, children: type === "directory" ? children : undefined };
+}
+
+async function readOpenCodeFormatterStatus(projectPath) {
+  return getOpenCodeClient().system.formatterStatus(projectPath);
+}
+
+async function readOpenCodeLspStatus(projectPath) {
+  return getOpenCodeClient().system.lspStatus(projectPath);
+}
+
+async function readOpenCodeFsTree(projectPath, payload = {}) {
+  try {
+    const result = await getOpenCodeClient().fs.tree(projectPath, payload);
+    const tree = unwrapOpenCodeData(result.tree || result);
+    const nodes = Array.isArray(tree)
+      ? tree.map((item) => normalizeEngineTreeNode(item)).filter(Boolean)
+      : Array.isArray(tree?.children)
+        ? tree.children.map((item) => normalizeEngineTreeNode(item)).filter(Boolean)
+        : [];
+    return { ...result, nodes };
+  } catch (error) {
+    const nodes = await listFiles(projectPath || rootDir, payload.path || "");
+    return { ok: true, source: "local", nodes, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function readOpenCodeFsFile(projectPath, payload = {}) {
+  try {
+    return await getOpenCodeClient().fs.file(projectPath, payload);
+  } catch (error) {
+    const filePath = payload.path || payload.file || "";
+    if (!filePath) return { ok: false, source: "local", error: "Missing file path.", content: "" };
+    const content = await fsp.readFile(safeJoin(projectPath || rootDir, filePath), "utf8");
+    return { ok: true, source: "local", path: filePath, content, error: error instanceof Error ? error.message : undefined };
+  }
+}
+
+async function searchOpenCodeFs(projectPath, payload = {}) {
+  try {
+    const result = await getOpenCodeClient().fs.search(projectPath, payload);
+    return {
+      ...result,
+      results: engineResultArray(result.results || result.raw || result).map(normalizeEngineSearchResult)
+    };
+  } catch (error) {
+    const files = await walkWorkspaceFiles(projectPath || rootDir);
+    const query = String(payload.query || "").toLowerCase();
+    const results = files
+      .filter((file) => !query || file.toLowerCase().includes(query))
+      .slice(0, payload.limit || 200)
+      .map((file, index) => normalizeEngineSearchResult(file, index));
+    return { ok: true, source: "local", results, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function grepOpenCodeFs(projectPath, payload = {}) {
+  try {
+    const result = await getOpenCodeClient().fs.grep(projectPath, payload);
+    return {
+      ...result,
+      results: engineResultArray(result.results || result.raw || result).map(normalizeEngineSearchResult)
+    };
+  } catch (error) {
+    const results = await searchWorkspace(projectPath || rootDir, { ...payload, query: payload.query || payload.pattern });
+    return { ok: true, source: "local", results, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function createOpenCodePty(projectPath, payload = {}) {
+  try {
+    return await getOpenCodeClient().pty.create(projectPath, payload);
+  } catch (error) {
+    return { ok: false, source: "engine", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function listOpenCodePtys(projectPath) {
+  try {
+    return await getOpenCodeClient().pty.list(projectPath);
+  } catch (error) {
+    return {
+      ok: true,
+      source: "local",
+      ptys: Array.from(terminals.keys()).map((id) => ({ id, ptyID: id, title: "Local terminal" })),
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function getOpenCodePty(projectPath, ptyID) {
+  try {
+    return await getOpenCodeClient().pty.get(projectPath, ptyID);
+  } catch (error) {
+    return {
+      ok: terminals.has(ptyID),
+      source: "local",
+      pty: terminals.has(ptyID) ? { id: ptyID, ptyID, title: "Local terminal" } : null,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+async function updateOpenCodePty(projectPath, ptyID, payload = {}) {
+  try {
+    return await getOpenCodeClient().pty.update(projectPath, ptyID, payload);
+  } catch (error) {
+    const term = terminals.get(ptyID);
+    if (term && payload.size?.columns && payload.size?.rows) {
+      term.resize(payload.size.columns, payload.size.rows);
+    }
+    return { ok: Boolean(term), source: "local", pty: term ? { id: ptyID, ptyID } : null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function deleteOpenCodePty(projectPath, ptyID) {
+  try {
+    return await getOpenCodeClient().pty.delete(projectPath, ptyID);
+  } catch (error) {
+    const term = terminals.get(ptyID);
+    term?.kill?.();
+    terminals.delete(ptyID);
+    return { ok: Boolean(term), source: "local", error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+async function connectOpenCodeMcp(projectPath, name, connect = true) {
+  return getOpenCodeClient().mcp.connection(projectPath, name, connect);
+}
+
+async function readOpenCodeGlobalConfig(projectPath) {
+  return getOpenCodeClient().config.global(projectPath);
+}
+
+async function writeOpenCodeGlobalConfig(projectPath, config) {
+  return getOpenCodeClient().config.writeGlobal(projectPath, config);
 }
 
 async function abortOpenCodeSession(sessionID, projectPath) {
@@ -4454,6 +4949,13 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
   const promptText = String(prompt || "").trim();
   const requestId = options.requestId || `agent-${Date.now().toString(36)}`;
   const permissionMode = options.permissionMode || "full";
+  const permissionRules = options.permissionRules || options.permission || options.permissions;
+  const agent = options.agent || "build";
+  // OpenCode waits for session.status idle; only cap this loop when a caller explicitly asks for a timeout.
+  const requestedTimeoutMs = Number(options.timeoutMS || options.timeout || 0);
+  const maxWaitMs = Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+    ? Math.max(requestedTimeoutMs, 60000)
+    : 0;
   if (!promptText) {
     return {
       exitCode: 1,
@@ -4472,7 +4974,7 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
   }
 
   emitAgentEvent(sender, requestId, { type: "status", status: "starting", message: "Starting Code session..." });
-  const session = await ensureOpenCodeSession(projectPath, modelSpec, permissionMode);
+  const session = await ensureOpenCodeSession(projectPath, modelSpec, permissionMode, agent, permissionRules);
   emitAgentEvent(sender, requestId, {
     type: "session",
     sessionID: session.id,
@@ -4483,6 +4985,7 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
   streamOpenCodeEvents(sender, requestId, session.id, projectPath, eventController).catch(() => {});
   const beforeMessages = await readOpenCodeMessages(session.id, projectPath);
   const previousAssistantCount = beforeMessages.filter((message) => openCodeMessageRole(message) === "assistant").length;
+  const turnMessageID = options.messageID || createOpenCodeMessageId();
   const userPrompt = options.planMode
     ? `Plan mode is enabled. First reason about the safest approach, then ask before making destructive changes.\n\n${promptText}`
     : promptText;
@@ -4497,14 +5000,16 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
     const commandExists = commands.some((command) => command.name === commandName);
     if (commandExists) {
       await runOpenCodeCommand(session.id, projectPath, {
-        agent: "build",
+        messageID: turnMessageID,
+        agent,
         model: modelSpec.label,
         command: commandName,
         arguments: commandArgumentsWithIdentity
       });
     } else {
       await sendOpenCodePrompt(session.id, projectPath, {
-        agent: "build",
+        messageID: turnMessageID,
+        agent,
         modelRef: openCodeModelRef(modelSpec),
         system: codeWorkbenchIdentity,
         parts: [{ type: "text", text: effectivePrompt }]
@@ -4512,7 +5017,8 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
     }
   } else {
     await sendOpenCodePrompt(session.id, projectPath, {
-      agent: "build",
+      messageID: turnMessageID,
+      agent,
       modelRef: openCodeModelRef(modelSpec),
       system: codeWorkbenchIdentity,
       parts: [{ type: "text", text: effectivePrompt }]
@@ -4526,10 +5032,10 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
   let lastPermissionSignature = "";
   let lastChangeAt = Date.now();
   const startedAt = Date.now();
-  while (Date.now() - startedAt < 180000) {
+  while (!maxWaitMs || Date.now() - startedAt < maxWaitMs) {
     await wait(700);
     const messages = await readOpenCodeMessages(session.id, projectPath);
-    const text = bestAssistantText(messages, previousAssistantCount);
+    const text = bestAssistantText(messages, previousAssistantCount, turnMessageID);
     if (text !== lastText) {
       lastText = text;
       lastChangeAt = Date.now();
@@ -4540,7 +5046,7 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
       });
     }
 
-    const tools = collectOpenCodeTools(messages, previousAssistantCount);
+    const tools = collectOpenCodeTools(messages, previousAssistantCount, turnMessageID);
     lastTools = tools;
     const toolSignature = JSON.stringify(tools.map((tool) => [tool.id, tool.type, tool.status, tool.title]));
     if (tools.length && toolSignature !== lastToolSignature) {
@@ -4566,12 +5072,25 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
     const statusMap = await readOpenCodeSessionStatus(projectPath);
     const status = statusMap?.[session.id]?.type || statusMap?.[session.id]?.status || "";
     const stableFor = Date.now() - lastChangeAt;
-    const latestMessage = latestAssistantMessage(messages, previousAssistantCount);
-    const finishReason = latestMessage?.info?.finish || latestMessage?.finish || latestMessage?.message?.finish || "";
+    const latestMessage = latestAssistantMessage(messages, previousAssistantCount, turnMessageID);
     const hasText = Boolean(lastText.trim());
-    const canFinishWithText = hasText && (status === "idle" || stableFor > 10000);
-    const canFinishToolOnly = !hasText && tools.length && status === "idle" && stableFor > 10000 && finishReason !== "tool-calls";
+    const normalizedStatus = String(status || "").toLowerCase();
+    const isIdleStatus = ["idle", "done", "complete", "completed"].includes(normalizedStatus);
+    const canFinishWithText = hasText && isIdleStatus && stableFor > 1200;
+    const canFinishToolOnly = !hasText && tools.length && isIdleStatus && stableFor > 25000;
     if (canFinishWithText || canFinishToolOnly) {
+      if (!lastText) {
+        const refreshedMessages = await readOpenCodeMessages(session.id, projectPath).catch(() => messages);
+        const refreshedText = bestAssistantText(refreshedMessages, previousAssistantCount, turnMessageID);
+        if (refreshedText) {
+          lastText = refreshedText;
+          emitAgentEvent(sender, requestId, {
+            type: "text",
+            sessionID: session.id,
+            text: lastText
+          });
+        }
+      }
       const messageID = latestMessage?.info?.id || latestMessage?.id || latestMessage?.message?.id;
       const diff = await readOpenCodeDiff(session.id, projectPath, messageID);
       if (diff.length) {
@@ -4591,6 +5110,7 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
         command: `code session ${session.id} (${modelSpec.label})`,
         sessionID: session.id,
         messageID,
+        requestMessageID: turnMessageID,
         diff,
         tools,
         providerID: modelSpec.providerID,
@@ -4602,15 +5122,16 @@ async function runGuiAgentCommand(projectPath, model, prompt, sender, options = 
   eventController.abort();
   emitAgentEvent(sender, requestId, {
     type: "status",
-    status: lastText ? "done" : "timeout",
-    message: lastText ? "Code finished." : "Code timed out."
+    status: "timeout",
+    message: lastText ? "Code wait timed out after a partial response." : "Code timed out."
   });
   return {
-    exitCode: lastText || lastTools.length ? 0 : 1,
+    exitCode: lastText || lastTools.length ? 124 : 1,
     stdout: lastText || (lastTools.length ? `Code completed with ${lastTools.length} tool ${lastTools.length === 1 ? "step" : "steps"}.` : ""),
-    stderr: lastText || lastTools.length ? "" : "Code session timed out before an assistant response was available.",
+    stderr: lastText || lastTools.length ? `Code Workbench stopped waiting after ${Math.round(maxWaitMs / 1000)} seconds. The response above may be partial.` : "Code session timed out before an assistant response was available.",
     command: `code session ${session.id} (${modelSpec.label})`,
     sessionID: session.id,
+    requestMessageID: turnMessageID,
     tools: lastTools,
     providerID: modelSpec.providerID,
     modelID: modelSpec.modelID
@@ -4794,6 +5315,44 @@ async function gitStatus(workspacePath) {
     changes,
     message: status.exitCode === 0 ? "" : (status.stderr || status.stdout || "Not a git repository.")
   };
+}
+
+function gitStatusFromPorcelain(output = "") {
+  return String(output || "")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const status = line.slice(0, 2).trim() || "modified";
+      const rawPath = line.slice(3).trim();
+      const pathText = rawPath.includes(" -> ") ? rawPath.split(" -> ").pop() : rawPath;
+      return {
+        file: pathText,
+        path: pathText,
+        status,
+        additions: 0,
+        deletions: 0
+      };
+    });
+}
+
+function vcsPathsFromPayload(payload = {}) {
+  const values = []
+    .concat(payload.path || [])
+    .concat(payload.paths || [])
+    .concat(payload.files || [])
+    .filter(Boolean);
+  return values
+    .map((item) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") return item.path || item.file || item.name || "";
+      return "";
+    })
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+}
+
+async function runGitArgs(projectPath, args) {
+  return spawnPromise("git", args, { cwd: projectPath || rootDir });
 }
 
 async function getLessons() {
@@ -5106,7 +5665,34 @@ ipcMain.handle("project:open", async () => {
 });
 
 ipcMain.handle("files:read", async (_event, workspacePath, relativePath) => {
-  return fsp.readFile(safeJoin(workspacePath, relativePath), "utf8");
+  const target = safeJoin(workspacePath, relativePath);
+  await assertEditorReadableFile(target);
+  return fsp.readFile(target, "utf8");
+});
+
+ipcMain.handle("files:readRange", async (_event, workspacePath, relativePath, offset = 0, length = 64 * 1024) => {
+  const target = safeJoin(workspacePath, relativePath);
+  const stat = await fsp.stat(target);
+  if (!stat.isFile()) throw new Error("Only files can be read.");
+  const start = Math.max(0, Number(offset) || 0);
+  const size = Math.max(1, Math.min(Number(length) || 64 * 1024, 512 * 1024));
+  const handle = await fsp.open(target, "r");
+  try {
+    const buffer = Buffer.alloc(Math.min(size, Math.max(0, stat.size - start)));
+    if (!buffer.length) {
+      return { content: "", offset: start, bytesRead: 0, size: stat.size, eof: true };
+    }
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    return {
+      content: buffer.subarray(0, bytesRead).toString("utf8"),
+      offset: start,
+      bytesRead,
+      size: stat.size,
+      eof: start + bytesRead >= stat.size
+    };
+  } finally {
+    await handle.close();
+  }
 });
 
 ipcMain.handle("files:write", async (_event, workspacePath, relativePath, content) => {
@@ -5147,7 +5733,22 @@ ipcMain.handle("files:duplicate", async (_event, workspacePath, fromPath, toPath
   return true;
 });
 
-ipcMain.handle("workspace:search", (_event, workspacePath, payload) => searchWorkspace(workspacePath, payload));
+ipcMain.handle("workspace:search", async (_event, workspacePath, payload) => {
+  const query = String(payload?.query || "").trim();
+  if (!query) return [];
+  try {
+    const result = await grepOpenCodeFs(workspacePath || rootDir, {
+      ...payload,
+      pattern: query,
+      query,
+      limit: 500
+    });
+    if (Array.isArray(result.results) && result.results.length) return result.results;
+  } catch {
+    // Fall back to local search below.
+  }
+  return searchWorkspace(workspacePath, payload);
+});
 
 ipcMain.handle("workspace:symbols", (_event, workspacePath, query) => symbolSearch(workspacePath, query));
 
@@ -5340,6 +5941,44 @@ ipcMain.handle("opencode:providerApiKey", async (_event, payload = {}) => {
   return saveOpenCodeProviderApiKey(payload.providerID, payload.key || "", payload.projectPath || rootDir);
 });
 
+ipcMain.handle("opencode:authList", async (_event, payload = {}) => {
+  return getOpenCodeClient().auth.list(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:authGet", async (_event, payload = {}) => {
+  return getOpenCodeClient().auth.get(payload.projectPath || rootDir, payload.accountID || payload.id);
+});
+
+ipcMain.handle("opencode:authCreate", async (_event, payload = {}) => {
+  return getOpenCodeClient().auth.create(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:authUpdate", async (_event, payload = {}) => {
+  return getOpenCodeClient().auth.update(payload.projectPath || rootDir, payload.accountID || payload.id, payload);
+});
+
+ipcMain.handle("opencode:authDelete", async (_event, payload = {}) => {
+  return getOpenCodeClient().auth.delete(payload.projectPath || rootDir, payload.accountID || payload.id);
+});
+
+ipcMain.handle("opencode:authActivate", async (_event, payload = {}) => {
+  return getOpenCodeClient().auth.activate(payload.projectPath || rootDir, payload.accountID || payload.id);
+});
+
+ipcMain.handle("opencode:catalogModels", async (_event, payload = {}) => {
+  return getOpenCodeClient().catalog.models(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:catalogModel", async (_event, payload = {}) => {
+  const modelValue = String(payload.model || payload.modelID || "");
+  const split = modelValue.includes("/") ? modelValue.split("/") : [];
+  return getOpenCodeClient().catalog.model(
+    payload.projectPath || rootDir,
+    payload.providerID || split[0],
+    payload.modelID || split.slice(1).join("/")
+  );
+});
+
 ipcMain.handle("opencode:messages", async (_event, payload = {}) => {
   return readOpenCodeMessages(payload.sessionID, payload.projectPath || rootDir);
 });
@@ -5398,12 +6037,24 @@ ipcMain.handle("opencode:sessionDiff", async (_event, payload = {}) => {
   return readOpenCodeDiff(payload.sessionID || payload.id, payload.projectPath || rootDir, payload.messageID);
 });
 
+ipcMain.handle("opencode:sessionContext", async (_event, payload = {}) => {
+  return readOpenCodeSessionContext(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
 ipcMain.handle("opencode:todo", async (_event, payload = {}) => {
   return readOpenCodeTodo(payload.sessionID || payload.id, payload.projectPath || rootDir);
 });
 
 ipcMain.handle("opencode:sessionTodo", async (_event, payload = {}) => {
   return readOpenCodeTodo(payload.sessionID || payload.id, payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:sessionWait", async (_event, payload = {}) => {
+  try {
+    return await getOpenCodeClient().session.wait(payload.sessionID || payload.id, payload.projectPath || rootDir, payload);
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });
 
 ipcMain.handle("opencode:prompt", async (_event, payload = {}) => {
@@ -5415,7 +6066,9 @@ ipcMain.handle("opencode:prompt", async (_event, payload = {}) => {
     {
       requestId: payload.requestId,
       permissionMode: payload.permissionMode,
-      planMode: payload.planMode
+      permissionRules: payload.permissionRules || payload.permission || payload.permissions,
+      planMode: payload.planMode,
+      agent: payload.agent || "build"
     }
   );
 });
@@ -5429,7 +6082,9 @@ ipcMain.handle("opencode:sessionPrompt", async (_event, payload = {}) => {
     {
       requestId: payload.requestId,
       permissionMode: payload.permissionMode,
-      planMode: payload.planMode
+      permissionRules: payload.permissionRules || payload.permission || payload.permissions,
+      planMode: payload.planMode,
+      agent: payload.agent || "build"
     }
   );
 });
@@ -5572,6 +6227,12 @@ async function resolveEngineLocation(projectPath) {
 // ── Engine config helpers ──
 
 async function readEngineConfig(projectPath) {
+  try {
+    const result = await getOpenCodeClient().config.project(projectPath);
+    if (result.ok) return result.config;
+  } catch {
+    // Fall back to direct legacy config route below.
+  }
   const url = await getEngineURL(projectPath);
   if (!url) return null;
   try {
@@ -5624,6 +6285,14 @@ ipcMain.handle("opencode:writeConfig", async (_event, payload) => {
   }
 });
 
+ipcMain.handle("opencode:engineConfigUpdate", async (_event, payload = {}) => {
+  try {
+    return await getOpenCodeClient().config.updateProject(payload.projectPath || rootDir, payload.config || payload.value || {});
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
 // ── Engine config IPC handlers ──
 
 ipcMain.handle("opencode:engineConfig", async (_event, payload) => {
@@ -5644,6 +6313,17 @@ ipcMain.handle("opencode:engineProviderConfig", async (_event, payload) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+});
+
+ipcMain.handle("opencode:globalConfig", async (_event, payload = {}) => {
+  if (Object.prototype.hasOwnProperty.call(payload, "config") || Object.prototype.hasOwnProperty.call(payload, "value")) {
+    return writeOpenCodeGlobalConfig(payload.projectPath || rootDir, payload.config ?? payload.value ?? {});
+  }
+  return readOpenCodeGlobalConfig(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:writeGlobalConfig", async (_event, payload = {}) => {
+  return writeOpenCodeGlobalConfig(payload.projectPath || rootDir, payload.config || {});
 });
 
 
@@ -5747,6 +6427,126 @@ ipcMain.handle("opencode:writeMCPConfig", async (_event, payload) => {
   }
 });
 
+ipcMain.handle("opencode:mcpConnect", async (_event, payload = {}) => {
+  return connectOpenCodeMcp(payload.projectPath || rootDir, payload.name || payload.server || payload.id, true);
+});
+
+ipcMain.handle("opencode:mcpDisconnect", async (_event, payload = {}) => {
+  return connectOpenCodeMcp(payload.projectPath || rootDir, payload.name || payload.server || payload.id, false);
+});
+
+ipcMain.handle("opencode:mcpPromptList", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.promptList(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:mcpPromptRender", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.promptRender(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:mcpResourceList", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.resourceList(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:mcpResourceRead", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.resourceRead(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:mcpServerList", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.serverList(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:mcpServerCreate", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.serverCreate(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:mcpServerOauthStart", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.serverOauthStart(payload.projectPath || rootDir, payload.name || payload.server || payload.id, payload);
+});
+
+ipcMain.handle("opencode:mcpServerOauthCallback", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.serverOauthCallback(payload.projectPath || rootDir, payload.name || payload.server || payload.id, payload);
+});
+
+ipcMain.handle("opencode:mcpServerOauthDelete", async (_event, payload = {}) => {
+  return getOpenCodeClient().mcp.serverOauthDelete(payload.projectPath || rootDir, payload.name || payload.server || payload.id);
+});
+
+ipcMain.handle("opencode:formatterStatus", async (_event, payload = {}) => {
+  return readOpenCodeFormatterStatus(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:lspStatus", async (_event, payload = {}) => {
+  return readOpenCodeLspStatus(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:fsTree", async (_event, payload = {}) => {
+  return readOpenCodeFsTree(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:fsFile", async (_event, payload = {}) => {
+  return readOpenCodeFsFile(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:fsSearch", async (_event, payload = {}) => {
+  return searchOpenCodeFs(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:fsGrep", async (_event, payload = {}) => {
+  return grepOpenCodeFs(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:vcsGet", async (_event, payload = {}) => {
+  try {
+    return await getOpenCodeClient().vcs.get(payload.projectPath || rootDir);
+  } catch (error) {
+    return readOpenCodeVcsStatus(payload.projectPath || rootDir);
+  }
+});
+
+ipcMain.handle("opencode:vcsStatus", async (_event, payload = {}) => {
+  return readOpenCodeVcsStatus(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:vcsDiff", async (_event, payload = {}) => {
+  return readOpenCodeVcsDiff(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:vcsStage", async (_event, payload = {}) => {
+  return changeOpenCodeVcsStage(payload.projectPath || rootDir, payload, true);
+});
+
+ipcMain.handle("opencode:vcsUnstage", async (_event, payload = {}) => {
+  return changeOpenCodeVcsStage(payload.projectPath || rootDir, payload, false);
+});
+
+ipcMain.handle("opencode:vcsPatch", async (_event, payload = {}) => {
+  return applyOpenCodeVcsPatch(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:vcsApply", async (_event, payload = {}) => {
+  return applyOpenCodeVcsPatch(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:ptyCreate", async (_event, payload = {}) => {
+  return createOpenCodePty(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:ptyList", async (_event, payload = {}) => {
+  return listOpenCodePtys(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:ptyGet", async (_event, payload = {}) => {
+  return getOpenCodePty(payload.projectPath || rootDir, payload.ptyID || payload.id);
+});
+
+ipcMain.handle("opencode:ptyUpdate", async (_event, payload = {}) => {
+  return updateOpenCodePty(payload.projectPath || rootDir, payload.ptyID || payload.id, payload);
+});
+
+ipcMain.handle("opencode:ptyDelete", async (_event, payload = {}) => {
+  return deleteOpenCodePty(payload.projectPath || rootDir, payload.ptyID || payload.id);
+});
+
 // ── Project copy IPC handlers ──
 
 ipcMain.handle("opencode:copyProject", async (_event, payload) => {
@@ -5760,14 +6560,65 @@ ipcMain.handle("opencode:copyProject", async (_event, payload) => {
 });
 
 ipcMain.handle("opencode:listProjects", async (_event, payload) => {
-  const { projectsDir } = payload;
+  const { projectsDir } = payload || {};
   try {
+    if (!projectsDir) {
+      const result = await getOpenCodeClient().project.list(rootDir);
+      const projects = openCodeArray(result.projects || result.raw || result)
+        .map((project) => project.path || project.name || project.id || project)
+        .filter(Boolean);
+      return { ok: true, source: "engine", projects };
+    }
     const entries = await fsp.readdir(projectsDir, { withFileTypes: true });
     const projects = entries.filter(e => e.isDirectory()).map(e => e.name);
     return { ok: true, projects };
   } catch (error) {
     return { ok: false, error: error.message };
   }
+});
+
+ipcMain.handle("opencode:projectList", async (_event, payload = {}) => {
+  return getOpenCodeClient().project.list(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:projectGet", async (_event, payload = {}) => {
+  return getOpenCodeClient().project.get(payload.projectPath || rootDir, payload.projectID || payload.id);
+});
+
+ipcMain.handle("opencode:projectUpdate", async (_event, payload = {}) => {
+  return getOpenCodeClient().project.update(payload.projectPath || rootDir, payload.projectID || payload.id, payload);
+});
+
+ipcMain.handle("opencode:workspaceList", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.list(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:workspaceGet", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.get(payload.projectPath || rootDir, payload.workspaceID || payload.id);
+});
+
+ipcMain.handle("opencode:workspaceCreate", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.create(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:workspaceUpdate", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.update(payload.projectPath || rootDir, payload.workspaceID || payload.id, payload);
+});
+
+ipcMain.handle("opencode:workspaceDelete", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.delete(payload.projectPath || rootDir, payload.workspaceID || payload.id);
+});
+
+ipcMain.handle("opencode:workspaceStatus", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.status(payload.projectPath || rootDir);
+});
+
+ipcMain.handle("opencode:workspaceSync", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.sync(payload.projectPath || rootDir, payload);
+});
+
+ipcMain.handle("opencode:workspaceWarp", async (_event, payload = {}) => {
+  return getOpenCodeClient().workspace.warp(payload.projectPath || rootDir, payload);
 });
 
 // ── CLI command IPC handler ──
@@ -6017,6 +6868,13 @@ ipcMain.handle("opencode:credentialDelete", async (_event, payload) => {
 // --- Q&A ---
 ipcMain.handle("opencode:questionRequests", async (_event, payload) => {
   try {
+    const result = await getOpenCodeClient().question.list(payload?.projectPath || rootDir);
+    const questions = openCodeArray(result.questions || result.raw || result);
+    if (questions.length || result.ok) return questions;
+  } catch {
+    // Fall back to compatibility request route below.
+  }
+  try {
     const res = await openCodeFetch("/api/question/request");
     const data = openCodeArray(res?.data || res);
     return data;
@@ -6039,7 +6897,14 @@ ipcMain.handle("opencode:sessionQuestions", async (_event, payload) => {
 
 ipcMain.handle("opencode:questionReply", async (_event, payload) => {
   const { sessionID, requestID, reply } = payload || {};
-  if (!sessionID || !requestID) return { ok: false, error: "Missing sessionID or requestID" };
+  if (!requestID) return { ok: false, error: "Missing requestID" };
+  try {
+    const result = await getOpenCodeClient().question.reply(payload?.projectPath || rootDir, requestID, { reply, sessionID });
+    if (result.ok) return { ok: true };
+  } catch {
+    // Fall back to session-scoped route below.
+  }
+  if (!sessionID) return { ok: false, error: "Missing sessionID" };
   try {
     await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/question/${encodeURIComponent(requestID)}/reply`, {
       method: "POST",
@@ -6054,7 +6919,14 @@ ipcMain.handle("opencode:questionReply", async (_event, payload) => {
 
 ipcMain.handle("opencode:questionReject", async (_event, payload) => {
   const { sessionID, requestID } = payload || {};
-  if (!sessionID || !requestID) return { ok: false, error: "Missing sessionID or requestID" };
+  if (!requestID) return { ok: false, error: "Missing requestID" };
+  try {
+    const result = await getOpenCodeClient().question.reject(payload?.projectPath || rootDir, requestID, { sessionID });
+    if (result.ok) return { ok: true };
+  } catch {
+    // Fall back to session-scoped route below.
+  }
+  if (!sessionID) return { ok: false, error: "Missing sessionID" };
   try {
     await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/question/${encodeURIComponent(requestID)}/reject`, {
       method: "POST",

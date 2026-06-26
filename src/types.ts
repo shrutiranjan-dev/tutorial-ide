@@ -21,6 +21,14 @@ export type TutorialIdeBridge = {
     providerAuthorize: (payload: AgentProviderAuthorizePayload) => Promise<AgentProviderAuthorization | null>;
     providerCallback: (payload: AgentProviderCallbackPayload) => Promise<boolean>;
     providerApiKey: (payload: AgentProviderApiKeyPayload) => Promise<boolean>;
+    authList: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { accounts?: unknown[] }>;
+    authGet: (payload: AgentProjectPayload & { accountID?: string; id?: string }) => Promise<AgentGenericEngineResult & { account?: unknown }>;
+    authCreate: (payload: AgentProjectPayload & Record<string, unknown>) => Promise<AgentGenericEngineResult & { account?: unknown }>;
+    authUpdate: (payload: AgentProjectPayload & { accountID?: string; id?: string } & Record<string, unknown>) => Promise<AgentGenericEngineResult & { account?: unknown }>;
+    authDelete: (payload: AgentProjectPayload & { accountID?: string; id?: string }) => Promise<AgentGenericEngineResult>;
+    authActivate: (payload: AgentProjectPayload & { accountID?: string; id?: string }) => Promise<AgentGenericEngineResult>;
+    catalogModels: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { models?: AgentModelInfo[] | unknown[] }>;
+    catalogModel: (payload: AgentProjectPayload & { providerID?: string; modelID?: string; model?: string }) => Promise<AgentGenericEngineResult & { model?: AgentModelInfo | unknown }>;
     command: (payload: AgentPromptPayload & { mode: "run" }) => Promise<CommandResult>;
     sendPrompt: (payload: AgentPromptPayload) => Promise<CommandResult>;
     shell: (payload: AgentShellPayload) => Promise<CommandResult>;
@@ -44,6 +52,8 @@ export type TutorialIdeBridge = {
     permissionList: (payload: AgentSessionPayload) => Promise<AgentPermissionRequest[]>;
     permissionReply: (payload: AgentPermissionReplyPayload) => Promise<boolean>;
     todo: (payload: AgentTodoPayload) => Promise<AgentTodoItem[]>;
+    sessionContext: (payload: AgentSessionPayload) => Promise<{ ok: boolean; context?: unknown; error?: string }>;
+    sessionWait: (payload: AgentSessionPayload & { timeout?: number; timeoutMS?: number; after?: string }) => Promise<AgentGenericEngineResult>;
     diff: (payload: AgentDiffPayload) => Promise<AgentDiffFile[]>;
     sessionCommand: (payload: AgentSessionCommandPayload) => Promise<CommandResult>;
     revert: (payload: AgentRevertPayload) => Promise<boolean>;
@@ -54,11 +64,84 @@ export type TutorialIdeBridge = {
     credentials: (payload: AgentProjectPayload) => Promise<CredentialInfo[]>;
     credentialUpdate: (payload: CredentialUpdatePayload) => Promise<{ ok: boolean }>;
     credentialDelete: (payload: CredentialDeletePayload) => Promise<{ ok: boolean }>;
+    sessionCompact: (payload: AgentSessionCompactPayload) => Promise<{ ok: boolean; error?: string }>;
+    revertStage: (payload: AgentSessionStageRevertPayload) => Promise<{ ok: boolean; error?: string }>;
+    revertClear: (payload: AgentSessionClearRevertPayload) => Promise<{ ok: boolean; error?: string }>;
+    revertCommit: (payload: AgentSessionCommitRevertPayload) => Promise<{ ok: boolean; error?: string }>;
+    modelDetail: (payload: AgentProjectPayload & { providerID: string; modelID: string }) => Promise<{ ok: boolean; model?: AgentModelInfo; error?: string }>;
+    providerDetail: (payload: AgentProjectPayload & { providerID: string }) => Promise<{ ok: boolean; provider?: AgentProviderInfo; error?: string }>;
+    sessionSwitchModel: (payload: AgentSwitchModelPayload) => Promise<{ ok: boolean; error?: string }>;
+    sessionSwitchAgent: (payload: AgentSwitchAgentPayload) => Promise<{ ok: boolean; error?: string }>;
+    agents: (payload: AgentProjectPayload) => Promise<AgentInfo[]>;
+    questionRequests: (payload: AgentProjectPayload & { sessionID?: string }) => Promise<AgentQuestion[]>;
+    sessionQuestions: (payload: AgentSessionPayload) => Promise<AgentQuestion[]>;
+    questionReply: (payload: AgentSessionPayload & { requestID: string; reply: string }) => Promise<{ ok: boolean; error?: string }>;
+    questionReject: (payload: AgentSessionPayload & { requestID: string }) => Promise<{ ok: boolean; error?: string }>;
+    skills: (payload: AgentProjectPayload) => Promise<SkillInfo[]>;
+    references: (payload: AgentProjectPayload) => Promise<ReferenceInfo[]>;
+    savedPermissions: (payload: AgentProjectPayload) => Promise<SavedPermission[]>;
+    deleteSavedPermission: (payload: AgentProjectPayload & { id: string }) => Promise<{ ok: boolean; error?: string }>;
+    health: (projectPath: string) => Promise<{ healthy: boolean; [key: string]: unknown }>;
+    location: (projectPath: string) => Promise<Record<string, unknown>>;
+    readConfig: (payload: AgentProjectPayload) => Promise<{ ok: boolean; config?: AgentConfigInfo; error?: string }>;
+    writeConfig: (payload: AgentProjectPayload & { config: AgentConfigInfo }) => Promise<{ ok: boolean; error?: string }>;
+    engineConfig: (payload: AgentProjectPayload) => Promise<{ ok: boolean; config?: AgentConfigInfo; error?: string }>;
+    engineConfigUpdate: (payload: AgentProjectPayload & { config?: AgentConfigInfo; value?: unknown }) => Promise<{ ok: boolean; config?: AgentConfigInfo; error?: string }>;
+    engineProviderConfig: (payload: AgentProjectPayload) => Promise<{ ok: boolean; config?: unknown; error?: string }>;
+    readMCPConfig: (payload: AgentProjectPayload) => Promise<{ ok: boolean; mcpConfig?: { servers: Record<string, unknown> }; error?: string }>;
+    writeMCPConfig: (payload: AgentProjectPayload & { mcpConfig: { servers: Record<string, unknown> } }) => Promise<{ ok: boolean; error?: string }>;
+    mcpConnect: (payload: AgentProjectPayload & { name: string }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+    mcpDisconnect: (payload: AgentProjectPayload & { name: string }) => Promise<{ ok: boolean; result?: unknown; error?: string }>;
+    mcpPromptList: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { prompts?: unknown[] }>;
+    mcpPromptRender: (payload: AgentProjectPayload & Record<string, unknown>) => Promise<AgentGenericEngineResult & { prompt?: unknown }>;
+    mcpResourceList: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { resources?: unknown[] }>;
+    mcpResourceRead: (payload: AgentProjectPayload & { uri?: string; url?: string; name?: string; server?: string }) => Promise<AgentGenericEngineResult & { resource?: unknown }>;
+    mcpServerList: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { servers?: unknown[] }>;
+    mcpServerCreate: (payload: AgentProjectPayload & Record<string, unknown>) => Promise<AgentGenericEngineResult & { server?: unknown }>;
+    mcpServerOauthStart: (payload: AgentProjectPayload & { name?: string; server?: string; id?: string }) => Promise<AgentGenericEngineResult>;
+    mcpServerOauthCallback: (payload: AgentProjectPayload & { name?: string; server?: string; id?: string; code?: string }) => Promise<AgentGenericEngineResult>;
+    mcpServerOauthDelete: (payload: AgentProjectPayload & { name?: string; server?: string; id?: string }) => Promise<AgentGenericEngineResult>;
+    formatterStatus: (payload: AgentProjectPayload) => Promise<AgentEngineStatusResult>;
+    lspStatus: (payload: AgentProjectPayload) => Promise<AgentEngineStatusResult>;
+    fsTree: (payload: AgentFsTreePayload) => Promise<AgentFsTreeResult>;
+    fsFile: (payload: AgentFsFilePayload) => Promise<AgentFsFileResult>;
+    fsSearch: (payload: AgentFsSearchPayload) => Promise<AgentFsSearchResult>;
+    fsGrep: (payload: AgentFsGrepPayload) => Promise<AgentFsSearchResult>;
+    vcsGet: (payload: AgentProjectPayload) => Promise<AgentVcsStatusResult>;
+    vcsStatus: (payload: AgentProjectPayload) => Promise<AgentVcsStatusResult>;
+    vcsDiff: (payload: AgentVcsDiffPayload) => Promise<AgentVcsDiffResult>;
+    vcsStage: (payload: AgentVcsStagePayload) => Promise<AgentVcsMutationResult>;
+    vcsUnstage: (payload: AgentVcsStagePayload) => Promise<AgentVcsMutationResult>;
+    vcsPatch: (payload: AgentVcsPatchPayload) => Promise<AgentVcsMutationResult>;
+    vcsApply: (payload: AgentVcsPatchPayload) => Promise<AgentVcsMutationResult>;
+    ptyCreate: (payload: AgentPtyCreatePayload) => Promise<AgentPtyResult>;
+    ptyList: (payload: AgentProjectPayload) => Promise<AgentPtyListResult>;
+    ptyGet: (payload: AgentPtyPayload) => Promise<AgentPtyResult>;
+    ptyUpdate: (payload: AgentPtyUpdatePayload) => Promise<AgentPtyResult>;
+    ptyDelete: (payload: AgentPtyPayload) => Promise<AgentPtyResult>;
+    globalConfig: (payload: AgentProjectPayload & { config?: unknown; value?: unknown }) => Promise<{ ok: boolean; config?: unknown; error?: string }>;
+    writeGlobalConfig: (payload: AgentProjectPayload & { config: unknown }) => Promise<{ ok: boolean; config?: unknown; error?: string }>;
+    copyProject: (payload: { sourcePath: string; destPath: string }) => Promise<{ ok: boolean; error?: string }>;
+    listProjects: (payload: { projectsDir: string }) => Promise<{ ok: boolean; projects?: string[]; error?: string }>;
+    projectList: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { projects?: unknown[] }>;
+    projectGet: (payload: AgentProjectPayload & { projectID?: string; id?: string }) => Promise<AgentGenericEngineResult & { project?: unknown }>;
+    projectUpdate: (payload: AgentProjectPayload & { projectID?: string; id?: string } & Record<string, unknown>) => Promise<AgentGenericEngineResult & { project?: unknown }>;
+    workspaceList: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { workspaces?: unknown[] }>;
+    workspaceGet: (payload: AgentProjectPayload & { workspaceID?: string; id?: string }) => Promise<AgentGenericEngineResult & { workspace?: unknown }>;
+    workspaceCreate: (payload: AgentProjectPayload & Record<string, unknown>) => Promise<AgentGenericEngineResult & { workspace?: unknown }>;
+    workspaceUpdate: (payload: AgentProjectPayload & { workspaceID?: string; id?: string } & Record<string, unknown>) => Promise<AgentGenericEngineResult & { workspace?: unknown }>;
+    workspaceDelete: (payload: AgentProjectPayload & { workspaceID?: string; id?: string }) => Promise<AgentGenericEngineResult>;
+    workspaceStatus: (payload: AgentProjectPayload) => Promise<AgentGenericEngineResult & { status?: unknown }>;
+    workspaceSync: (payload: AgentProjectPayload & Record<string, unknown>) => Promise<AgentGenericEngineResult>;
+    workspaceWarp: (payload: AgentProjectPayload & Record<string, unknown>) => Promise<AgentGenericEngineResult & { workspace?: unknown }>;
+    cli: (payload: AgentProjectPayload & { args: string[] }) => Promise<CommandResult & { ok?: boolean; error?: string }>;
+    mcpIntegrations: (payload: AgentProjectPayload) => Promise<{ ok: boolean; integrations: unknown[]; error?: string }>;
     onEvent: (callback: (event: AgentRuntimeEvent) => void) => () => void;
   };
   files: {
     list: (workspacePath: string) => Promise<FileNode[]>;
     read: (workspacePath: string, relativePath: string) => Promise<string>;
+    readRange: (workspacePath: string, relativePath: string, offset?: number, length?: number) => Promise<{ content: string; offset: number; bytesRead: number; size: number; eof: boolean }>;
     write: (workspacePath: string, relativePath: string, content: string) => Promise<boolean>;
     createFile: (workspacePath: string, relativePath: string, content?: string) => Promise<boolean>;
     createFolder: (workspacePath: string, relativePath: string) => Promise<boolean>;
@@ -323,6 +406,112 @@ export type AgentProjectPayload = {
   projectPath: string;
 };
 
+export type AgentGenericEngineResult = {
+  ok: boolean;
+  source?: "engine" | "local" | "browser-preview" | string;
+  result?: unknown;
+  raw?: unknown;
+  error?: string;
+};
+
+export type AgentEngineStatusResult = {
+  ok: boolean;
+  source?: "engine" | "browser-preview" | string;
+  formatter?: unknown;
+  lsp?: unknown;
+  error?: string;
+  [key: string]: unknown;
+};
+
+export type AgentFsTreePayload = AgentProjectPayload & {
+  path?: string;
+};
+
+export type AgentFsFilePayload = AgentProjectPayload & {
+  path?: string;
+  file?: string;
+};
+
+export type AgentFsSearchPayload = AgentProjectPayload & {
+  query: string;
+  type?: "file" | "directory" | string;
+  limit?: number;
+};
+
+export type AgentFsGrepPayload = AgentProjectPayload & {
+  pattern?: string;
+  query?: string;
+  include?: string;
+  limit?: number;
+};
+
+export type AgentFsTreeResult = {
+  ok: boolean;
+  source?: "engine" | "local" | "browser-preview" | string;
+  tree?: unknown;
+  nodes?: FileNode[];
+  error?: string;
+};
+
+export type AgentFsFileResult = {
+  ok: boolean;
+  source?: "engine" | "local" | "browser-preview" | string;
+  path?: string;
+  content?: string;
+  file?: unknown;
+  error?: string;
+};
+
+export type AgentFsSearchResult = {
+  ok: boolean;
+  source?: "engine" | "local" | "browser-preview" | string;
+  results?: Array<{ path: string; line?: number; column?: number; preview?: string }>;
+  raw?: unknown;
+  error?: string;
+};
+
+export type AgentPtyPayload = AgentProjectPayload & {
+  ptyID?: string;
+  id?: string;
+};
+
+export type AgentPtyCreatePayload = AgentProjectPayload & {
+  command?: string;
+  cwd?: string;
+  shell?: string;
+  title?: string;
+  size?: {
+    columns: number;
+    rows: number;
+  };
+};
+
+export type AgentPtyUpdatePayload = AgentPtyPayload & {
+  title?: string;
+  size?: {
+    columns: number;
+    rows: number;
+  };
+  columns?: number;
+  rows?: number;
+};
+
+export type AgentPtyResult = {
+  ok: boolean;
+  source?: "engine" | "local" | "browser-preview" | string;
+  pty?: unknown;
+  result?: unknown;
+  error?: string;
+};
+
+export type AgentPtyListResult = {
+  ok: boolean;
+  source?: "engine" | "local" | "browser-preview" | string;
+  ptys?: unknown[];
+  terminals?: unknown[];
+  error?: string;
+};
+
 export type AgentCommandInfo = {
   name: string;
   description?: string;
@@ -518,6 +707,72 @@ export type AgentDiffFile = {
   status?: "added" | "deleted" | "modified" | string;
 };
 
+export type AgentVcsFileStatus = {
+  file?: string;
+  path?: string;
+  status?: "added" | "deleted" | "modified" | string;
+  additions?: number;
+  deletions?: number;
+  [key: string]: unknown;
+};
+
+export type AgentVcsStatusResult = {
+  ok: boolean;
+  source?: "engine" | "git" | string;
+  status?: AgentVcsFileStatus[] | unknown;
+  changes?: AgentVcsFileStatus[] | Array<{ status: string; path: string }>;
+  branch?: string;
+  message?: string;
+  error?: string;
+};
+
+export type AgentVcsDiffPayload = AgentProjectPayload & {
+  staged?: boolean;
+  cached?: boolean;
+  raw?: boolean;
+  format?: "json" | "patch" | "raw" | string;
+  mode?: "worktree" | "default" | string;
+  context?: number;
+  path?: string;
+  paths?: string[];
+  files?: Array<string | { path?: string; file?: string; name?: string }>;
+};
+
+export type AgentVcsDiffResult = {
+  ok: boolean;
+  source?: "engine" | "git" | string;
+  diff?: unknown;
+  files?: AgentDiffFile[] | unknown[];
+  patch?: string;
+  command?: string;
+  error?: string;
+};
+
+export type AgentVcsStagePayload = AgentProjectPayload & {
+  file?: string;
+  path?: string;
+  files?: Array<string | { path?: string; file?: string; name?: string }>;
+  paths?: string[];
+};
+
+export type AgentVcsPatchPayload = AgentProjectPayload & {
+  patch: string;
+  diff?: string;
+  check?: boolean;
+  dryRun?: boolean;
+  staged?: boolean;
+};
+
+export type AgentVcsMutationResult = {
+  ok: boolean;
+  source?: "engine" | "git" | string;
+  result?: unknown;
+  stdout?: string;
+  stderr?: string;
+  command?: string;
+  error?: string;
+};
+
 export type AgentSessionSummary = {
   id: string;
   sessionID?: string;
@@ -709,6 +964,9 @@ export type AgentRuntimeEvent =
   // Permission lifecycle
   | { requestId: string; type: "permission.saved"; permissionID: string; time?: number }
   | { requestId: string; type: "permission.replied"; sessionID?: string; permissionID: string; reply: string; time?: number }
+  // Interactive question lifecycle
+  | { requestId: string; type: "question.asked"; sessionID?: string; questionID?: string; time?: number }
+  | { requestId: string; type: "question.replied"; sessionID?: string; questionID?: string; time?: number }
   // Provider lifecycle
   | { requestId: string; type: "provider.connected"; providerID: string; time?: number }
   | { requestId: string; type: "provider.disconnected"; providerID: string; time?: number }
@@ -724,6 +982,9 @@ export type AgentRuntimeEvent =
   | { requestId: string; type: "sync.started"; time?: number }
   | { requestId: string; type: "sync.completed"; time?: number }
   | { requestId: string; type: "sync.error"; error: string; time?: number }
+  // Workspace knowledge lifecycle
+  | { requestId: string; type: "skill.registered"; skillID?: string; time?: number }
+  | { requestId: string; type: "reference.updated"; referenceID?: string; time?: number }
   // Error events
   | { requestId: string; type: "error.internal"; error: string; time?: number }
   | { requestId: string; type: "error.session"; sessionID: string; error: string; time?: number }
@@ -849,9 +1110,11 @@ export interface ReferenceInfo {
 export type PermissionEffect = "allow" | "ask" | "deny";
 
 export interface PermissionRule {
+  permission?: string;
+  pattern?: string;
   action?: string;
   resource?: string;
-  effect: PermissionEffect;
+  effect?: PermissionEffect;
   description?: string;
 }
 
