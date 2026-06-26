@@ -1700,7 +1700,7 @@ function matchW3SchoolsTrack(answers = {}) {
   );
   if (exact) return exact;
   return w3schoolsTrackRegistry.find((track) => track.aliases.some((alias) => {
-    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\$&");
     return new RegExp(`(^|\\b)${escaped}(\\b|$)`, "i").test(text);
   })) || null;
 }
@@ -4663,7 +4663,7 @@ const workspaceIgnoredDirs = new Set([
 ]);
 
 function globToRegExp(pattern) {
-  const escaped = pattern.trim().replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  const escaped = pattern.trim().replace(/[.+^${}()|[\]\\]/g, "\$&").replace(/\*/g, ".*");
   return new RegExp(`^${escaped}$`);
 }
 
@@ -4703,7 +4703,7 @@ async function searchWorkspace(base, payload = {}) {
   const include = payload.include || "";
   const exclude = payload.exclude || "";
   const flags = payload.matchCase ? "g" : "gi";
-  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\$&");
   const source = payload.regex ? query : escaped;
   const word = payload.wholeWord ? `\\b(?:${source})\\b` : source;
   let matcher;
@@ -5534,6 +5534,132 @@ ipcMain.handle("ollama:chat", async (_event, payload) => {
   return data.message?.content || "Ollama returned an empty response.";
 });
 
+
+
+async function getEngineURL(projectPath) {
+  try {
+    const server = await ensureOpenCodeServer();
+    return server ? server.url : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function checkEngineHealth(projectPath) {
+  const url = await getEngineURL(projectPath);
+  if (!url) return { healthy: false };
+  try {
+    const res = await fetch(`${url}/api/health`);
+    if (!res.ok) return { healthy: false };
+    return { healthy: true, ...await res.json() };
+  } catch {
+    return { healthy: false };
+  }
+}
+
+async function resolveEngineLocation(projectPath) {
+  const url = await getEngineURL(projectPath);
+  if (!url) return null;
+  try {
+    const res = await fetch(`${url}/api/location`);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+// ── Engine config helpers ──
+
+async function readEngineConfig(projectPath) {
+  const url = await getEngineURL(projectPath);
+  if (!url) return null;
+  try {
+    const res = await fetch(`${url}/config`);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+async function readEngineProviderConfig(projectPath) {
+  const url = await getEngineURL(projectPath);
+  if (!url) return null;
+  try {
+    const res = await fetch(`${url}/config/providers`);
+    if (!res.ok) return null;
+    return res.json();
+  } catch {
+    return null;
+  }
+}
+
+// ── Config read/write IPC handlers ──
+
+ipcMain.handle("opencode:readConfig", async (_event, payload) => {
+  const { projectPath } = payload;
+  try {
+    const configPath = path.join(projectPath, "opencode.json");
+    const content = await fsp.readFile(configPath, "utf8");
+    return { ok: true, config: JSON.parse(content) };
+  } catch (error) {
+    const configPath = path.join(projectPath, "opencode.json");
+    // Return default config if file doesn't exist
+    if (error.code === "ENOENT") {
+      return { ok: true, config: { providers: {}, models: [], default_model: "" } };
+    }
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle("opencode:writeConfig", async (_event, payload) => {
+  const { projectPath, config } = payload;
+  try {
+    const configPath = path.join(projectPath, "opencode.json");
+    await fsp.writeFile(configPath, JSON.stringify(config, null, 2), "utf8");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+// ── Engine config IPC handlers ──
+
+ipcMain.handle("opencode:engineConfig", async (_event, payload) => {
+  const { projectPath } = payload || {};
+  try {
+    const config = await readEngineConfig(projectPath);
+    return { ok: true, config };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle("opencode:engineProviderConfig", async (_event, payload) => {
+  const { projectPath } = payload || {};
+  try {
+    const config = await readEngineProviderConfig(projectPath);
+    return { ok: true, config };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+
+
+// ── Health check IPC handler ──
+
+ipcMain.handle("opencode:health", async (_event, projectPath) => {
+  return checkEngineHealth(projectPath);
+});
+
+// ── Engine location IPC handler ──
+
+ipcMain.handle("opencode:location", async (_event, projectPath) => {
+  return resolveEngineLocation(projectPath);
+});
+
 ipcMain.handle("terminal:start", (event, workspacePath) => {
   const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const shell = process.env.SHELL || (process.platform === "win32" ? "powershell.exe" : "bash");
@@ -5569,4 +5695,374 @@ ipcMain.on("terminal:resize", (_event, terminalId, cols, rows) => {
 ipcMain.on("terminal:stop", (_event, terminalId) => {
   terminals.get(terminalId)?.kill();
   terminals.delete(terminalId);
+});
+
+// ── Spawn promise utility ──
+
+function spawnPromise(bin, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "", stderr = "";
+    child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
+    child.on("error", reject);
+    child.on("close", (exitCode) => {
+      resolve({ exitCode: exitCode ?? 1, stdout, stderr, command: `${bin} ${args.join(" ")}` });
+    });
+  });
+}
+
+async function runOpenCodeCLI(projectPath, ...args) {
+  const enginePath = path.join(__dirname, "..", "vendor", "code", "opencode");
+  if (process.platform === "win32") {
+    const res = await spawnPromise(enginePath + ".exe", args, { cwd: projectPath });
+    return res;
+  }
+  const res = await spawnPromise(enginePath, args, { cwd: projectPath });
+  return res;
+}
+
+// ── MCP Config IPC handlers ──
+
+ipcMain.handle("opencode:readMCPConfig", async (_event, payload) => {
+  const { projectPath } = payload;
+  const mcpPath = path.join(projectPath, ".opencode", "mcp.json");
+  try {
+    const content = await fsp.readFile(mcpPath, "utf8");
+    return { ok: true, mcpConfig: JSON.parse(content) };
+  } catch {
+    return { ok: true, mcpConfig: { servers: {} } };
+  }
+});
+
+ipcMain.handle("opencode:writeMCPConfig", async (_event, payload) => {
+  const { projectPath, mcpConfig } = payload;
+  const mcpPath = path.join(projectPath, ".opencode", "mcp.json");
+  try {
+    await fsp.mkdir(path.dirname(mcpPath), { recursive: true });
+    await fsp.writeFile(mcpPath, JSON.stringify(mcpConfig, null, 2), "utf8");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+// ── Project copy IPC handlers ──
+
+ipcMain.handle("opencode:copyProject", async (_event, payload) => {
+  const { sourcePath, destPath } = payload;
+  try {
+    await fsp.cp(sourcePath, destPath, { recursive: true });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle("opencode:listProjects", async (_event, payload) => {
+  const { projectsDir } = payload;
+  try {
+    const entries = await fsp.readdir(projectsDir, { withFileTypes: true });
+    const projects = entries.filter(e => e.isDirectory()).map(e => e.name);
+    return { ok: true, projects };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+// ── CLI command IPC handler ──
+
+ipcMain.handle("opencode:cli", async (_event, payload) => {
+  const { projectPath, args } = payload;
+  try {
+    const result = await runOpenCodeCLI(projectPath, ...args);
+    return { ok: true, ...result };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
+// ── MCP Integration API endpoint ──
+
+ipcMain.handle("opencode:mcpIntegrations", async (_event, payload) => {
+  const { projectPath } = payload || {};
+  try {
+    const res = await openCodeFetch("/api/integration?ref=mcp");
+    return { ok: true, integrations: Array.isArray(res?.data) ? res.data : [] };
+  } catch {
+    return { ok: true, integrations: [] };
+  }
+});
+
+// --- Agent API ---
+ipcMain.handle("opencode:agents", async (_event, payload) => {
+  try {
+    const res = await openCodeFetch("/api/agent");
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+// --- Skill API ---
+ipcMain.handle("opencode:skills", async (_event, payload) => {
+  try {
+    const res = await openCodeFetch("/api/skill");
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+// --- Reference API ---
+ipcMain.handle("opencode:references", async (_event, payload) => {
+  try {
+    const res = await openCodeFetch("/api/reference");
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+// --- Saved Permissions ---
+ipcMain.handle("opencode:savedPermissions", async (_event, payload) => {
+  try {
+    const res = await openCodeFetch("/api/permission/saved");
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle("opencode:deleteSavedPermission", async (_event, payload) => {
+  const { id } = payload || {};
+  try {
+    await openCodeFetch(`/api/permission/saved/${encodeURIComponent(id)}`, { method: "DELETE" });
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+});
+
+// --- Session Compact ---
+ipcMain.handle("opencode:sessionCompact", async (_event, payload) => {
+  const { projectPath, sessionID } = payload || {};
+  if (!sessionID) return { ok: false, error: "Missing sessionID" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/compact`, { method: "POST" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// --- Revert Stage / Clear / Commit ---
+ipcMain.handle("opencode:revertStage", async (_event, payload) => {
+  const { projectPath, sessionID, messageID } = payload || {};
+  if (!sessionID || !messageID) return { ok: false, error: "Missing sessionID or messageID" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/revert`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messageID })
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("opencode:revertClear", async (_event, payload) => {
+  const { projectPath, sessionID } = payload || {};
+  if (!sessionID) return { ok: false, error: "Missing sessionID" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/workspace/clear`, { method: "POST" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("opencode:revertCommit", async (_event, payload) => {
+  const { projectPath, sessionID } = payload || {};
+  if (!sessionID) return { ok: false, error: "Missing sessionID" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/workspace/commit`, { method: "POST" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// --- Model Detail ---
+ipcMain.handle("opencode:modelDetail", async (_event, payload) => {
+  const { model } = payload || {};
+  if (!model) return null;
+  try {
+    const res = await openCodeFetch(`/api/model/${encodeURIComponent(model)}`);
+    return res?.data || res || null;
+  } catch {
+    return null;
+  }
+});
+
+// --- Provider / Integration Detail ---
+ipcMain.handle("opencode:providerDetail", async (_event, payload) => {
+  const { id } = payload || {};
+  if (!id) return null;
+  try {
+    const res = await openCodeFetch(`/api/integration/${encodeURIComponent(id)}`);
+    return res?.data || res || null;
+  } catch {
+    return null;
+  }
+});
+
+// --- Session Switch Model ---
+ipcMain.handle("opencode:sessionSwitchModel", async (_event, payload) => {
+  const { projectPath, sessionID, model } = payload || {};
+  if (!sessionID || !model) return { ok: false, error: "Missing sessionID or model" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/model`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model })
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// --- Session Switch Agent ---
+ipcMain.handle("opencode:sessionSwitchAgent", async (_event, payload) => {
+  const { projectPath, sessionID, agent } = payload || {};
+  if (!sessionID || !agent) return { ok: false, error: "Missing sessionID or agent" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/agent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agent })
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// --- OAuth Attempt Poll / Cancel ---
+ipcMain.handle("opencode:oauthAttemptPoll", async (_event, payload) => {
+  const { projectPath, attemptID } = payload || {};
+  if (!attemptID) return null;
+  try {
+    const res = await openCodeFetch(`/api/integration/attempt/${encodeURIComponent(attemptID)}`);
+    return res?.data || res || null;
+  } catch {
+    return null;
+  }
+});
+
+ipcMain.handle("opencode:oauthAttemptCancel", async (_event, payload) => {
+  const { projectPath, attemptID } = payload || {};
+  if (!attemptID) return { ok: false };
+  try {
+    await openCodeFetch(`/api/integration/attempt/${encodeURIComponent(attemptID)}`, { method: "DELETE" });
+    return { ok: true };
+  } catch {
+    return { ok: false };
+  }
+});
+
+// --- Credential CRUD ---
+ipcMain.handle("opencode:credentials", async (_event, payload) => {
+  try {
+    const res = await openCodeFetch("/api/credential");
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle("opencode:credentialUpdate", async (_event, payload) => {
+  const { credentialID, label } = payload || {};
+  if (!credentialID) return { ok: false, error: "Missing credentialID" };
+  try {
+    await openCodeFetch(`/api/credential/${encodeURIComponent(credentialID)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label })
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("opencode:credentialDelete", async (_event, payload) => {
+  const { credentialID } = payload || {};
+  if (!credentialID) return { ok: false, error: "Missing credentialID" };
+  try {
+    await openCodeFetch(`/api/credential/${encodeURIComponent(credentialID)}`, { method: "DELETE" });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// --- Q&A ---
+ipcMain.handle("opencode:questionRequests", async (_event, payload) => {
+  try {
+    const res = await openCodeFetch("/api/question/request");
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle("opencode:sessionQuestions", async (_event, payload) => {
+  const { sessionID } = payload || {};
+  if (!sessionID) return [];
+  try {
+    const res = await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/question`);
+    const data = openCodeArray(res?.data || res);
+    return data;
+  } catch {
+    return [];
+  }
+});
+
+ipcMain.handle("opencode:questionReply", async (_event, payload) => {
+  const { sessionID, requestID, reply } = payload || {};
+  if (!sessionID || !requestID) return { ok: false, error: "Missing sessionID or requestID" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/question/${encodeURIComponent(requestID)}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reply })
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+ipcMain.handle("opencode:questionReject", async (_event, payload) => {
+  const { sessionID, requestID } = payload || {};
+  if (!sessionID || !requestID) return { ok: false, error: "Missing sessionID or requestID" };
+  try {
+    await openCodeFetch(`/api/session/${encodeURIComponent(sessionID)}/question/${encodeURIComponent(requestID)}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
 });

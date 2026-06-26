@@ -48,11 +48,23 @@ import type {
   AgentPermissionRequest,
   AgentProviderAuthMap,
   AgentProviderState,
+  AgentQuestion,
   AgentRuntimeEvent,
   AgentToolPart,
   CommandResult,
+  CredentialInfo,
+  CredentialUpdatePayload,
+  CredentialDeletePayload,
   FileNode,
-  OpenTab
+  IntegrationInfo,
+  IntegrationAuthMethod,
+  OAuthAttempt,
+  OpenTab,
+  PermissionEffect,
+  PermissionRule,
+  ReferenceInfo,
+  SavedPermission,
+  SkillInfo
 } from "./types";
 import { createBrowserTutorialIde } from "./browserApi";
 import { extensionIcon, languageFromPath } from "./utils";
@@ -142,11 +154,29 @@ type AgentTodoItem = {
 
 type OptionalOpenCodeBridge = typeof api.opencode & {
   startSession?: (payload: { projectPath: string; model?: string; sessionID?: string }) => Promise<{ sessionID?: string; id?: string; providerID?: string; modelID?: string }>;
-  prompt?: (payload: { projectPath: string; sessionID?: string; model?: string; prompt: string; requestId?: string; permissionMode?: string; planMode?: boolean }) => Promise<CommandResult & { admitted?: boolean }>;
+  prompt?: (payload: { projectPath: string; sessionID?: string; model?: string; prompt: string; requestId?: string; permissionMode?: string; permissionRules?: Array<{ action?: string; resource?: string; effect: string; description?: string }>; planMode?: boolean }) => Promise<CommandResult & { admitted?: boolean }>;
   fork?: (payload: { projectPath: string; sessionID: string; messageID?: string }) => Promise<{ sessionID?: string; id?: string }>;
   startEvents?: (payload: { projectPath: string; sessionID?: string; requestId?: string }) => Promise<{ streamID?: string; subscriptionID?: string; id?: string }>;
   stopEvents?: (payload: string | { streamID?: string; subscriptionID?: string; requestId?: string }) => Promise<void>;
   permissionReply?: (payload: { projectPath: string; sessionID: string; requestID: string; reply: "once" | "always" | "reject" }) => Promise<unknown>;
+  integrations?: (payload: { projectPath: string }) => Promise<IntegrationInfo[]>;
+  oauthAttemptPoll?: (payload: { projectPath: string; attemptID: string }) => Promise<OAuthAttempt | null>;
+  oauthAttemptCancel?: (payload: { projectPath: string; attemptID: string }) => Promise<{ ok: boolean }>;
+  credentials?: (payload: { projectPath: string }) => Promise<CredentialInfo[]>;
+  credentialUpdate?: (payload: CredentialUpdatePayload) => Promise<{ ok: boolean }>;
+  credentialDelete?: (payload: CredentialDeletePayload) => Promise<{ ok: boolean }>;
+  // Q&A methods
+  questionRequests?: (payload: { projectPath: string; sessionID?: string }) => Promise<AgentQuestion[]>;
+  sessionQuestions?: (payload: { projectPath: string; sessionID: string }) => Promise<AgentQuestion[]>;
+  questionReply?: (payload: { projectPath: string; sessionID: string; requestID: string; reply: string }) => Promise<{ ok: boolean }>;
+  questionReject?: (payload: { projectPath: string; sessionID: string; requestID: string }) => Promise<{ ok: boolean }>;
+  // Skills method
+  skills?: (payload: { projectPath: string }) => Promise<SkillInfo[]>;
+  // References method
+  references?: (payload: { projectPath: string }) => Promise<ReferenceInfo[]>;
+  // Saved permissions methods
+  savedPermissions?: (payload: { projectPath: string }) => Promise<SavedPermission[]>;
+  deleteSavedPermission?: (payload: { projectPath: string; id: string }) => Promise<{ ok: boolean }>;
 };
 
 type WorkspaceState = {
@@ -233,6 +263,39 @@ function expandSlashPrompt(value: string) {
   if (!match) return value;
   const detail = rest.join(" ").trim();
   return detail ? `${match.prompt}\n\nUser detail: ${detail}` : match.prompt;
+}
+
+
+const TOOL_PERMISSIONS = [
+  { id: "read", label: "Read files" },
+  { id: "edit", label: "Edit files" },
+  { id: "glob", label: "Glob patterns" },
+  { id: "grep", label: "Grep search" },
+  { id: "list", label: "List directory" },
+  { id: "bash", label: "Run commands" },
+  { id: "task", label: "Run subtasks" },
+  { id: "external_directory", label: "Access external dirs" },
+  { id: "lsp", label: "LSP access" },
+  { id: "skill", label: "Run skills" },
+  { id: "todowrite", label: "Write todos" },
+  { id: "webfetch", label: "Fetch web URLs" },
+  { id: "websearch", label: "Web search" },
+];
+
+const TOOL_PERMISSION_GROUPS = [
+  { label: "File operations", tools: ["read", "edit", "glob", "grep", "list"] },
+  { label: "Execution", tools: ["bash", "task", "skill"] },
+  { label: "External", tools: ["external_directory", "lsp"] },
+  { label: "Other", tools: ["todowrite", "webfetch", "websearch"] },
+];
+
+function permissionRulesForMode(permissions: Record<string, string>): Array<{ action?: string; resource?: string; effect: string; description?: string }> {
+  return TOOL_PERMISSIONS.map((tool) => ({
+    action: tool.id,
+    resource: "*",
+    effect: permissions[tool.id] || "allow",
+    description: tool.label,
+  }));
 }
 
 function engineSlashCommands(commands: AgentCommandInfo[]) {
@@ -479,17 +542,29 @@ export function App() {
   const [ollamaModels, setOllamaModels] = useState<string[]>([]);
   const [opencodeVersion, setOpencodeVersion] = useState("");
   const [selectedModel, setSelectedModel] = useState(initialStateRef.current.selectedModel || "");
+  const [serverHealth, setServerHealth] = useState<{ healthy: boolean; [key: string]: unknown }>({ healthy: false });
+  const [serverLocation, setServerLocation] = useState<{ url?: string; port?: number; [key: string]: unknown } | null>(null);
+  const [lastHealthCheck, setLastHealthCheck] = useState<string>("");
   const [agentPrompt, setAgentPrompt] = useState(starterPrompt);
   const [agentBusy, setAgentBusy] = useState(false);
   const [activeAgentSessionId, setActiveAgentSessionId] = useState("");
   const [activeAgentMessageId, setActiveAgentMessageId] = useState("");
   const [agentPermissionMode, setAgentPermissionMode] = useState("Full access");
+  const [granularPermissions, setGranularPermissions] = useState<Record<string, "allow" | "ask" | "deny">>(() => {
+    const defaults: Record<string, "allow" | "ask" | "deny"> = {};
+    TOOL_PERMISSIONS.forEach(t => defaults[t.id] = "allow");
+    return defaults;
+  });
+  const [savedPermissions, setSavedPermissions] = useState<SavedPermission[]>([]);
   const [agentPlanMode, setAgentPlanMode] = useState(false);
   const [agentContextMode, setAgentContextMode] = useState<AgentContextMode>("workspace");
   const [agentSessions, setAgentSessions] = useState<AgentSessionInfo[]>([]);
   const [agentCommands, setAgentCommands] = useState<AgentCommandInfo[]>([]);
   const [agentProviderState, setAgentProviderState] = useState<AgentProviderState>({ all: [], default: {}, connected: [] });
   const [agentProviderAuth, setAgentProviderAuth] = useState<AgentProviderAuthMap>({});
+  const [v2Models, setV2Models] = useState<Array<{ id: string; providerID: string; name: string }>>([]);
+  const [agentList, setAgentList] = useState<Array<{ name: string; mode?: string; description?: string }>>([]);
+  const [selectedAgent, setSelectedAgent] = useState("build");
   const [agentActivityChips, setAgentActivityChips] = useState<AgentActivityChip[]>([]);
   const [agentMessages, setAgentMessages] = useState<AgentMessage[]>([
     {
@@ -499,6 +574,11 @@ export function App() {
       meta: "Code Workbench"
     }
   ]);
+  const [pendingQuestions, setPendingQuestions] = useState<AgentQuestion[]>([]);
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
+  const [references, setReferences] = useState<ReferenceInfo[]>([]);
+  const [skillsOpen, setSkillsOpen] = useState(false);
+  const [referencesOpen, setReferencesOpen] = useState(false);
   const [agentLog, setAgentLog] = useState<string[]>([
     "Code GUI mode active. Terminal UI launching is disabled.",
     "Use the Ollama model dropdown for local and cloud models.",
@@ -512,11 +592,26 @@ export function App() {
   const [symbols, setSymbols] = useState<SymbolResult[]>([]);
   const [gitState, setGitState] = useState<GitState>({ ok: false, branch: "checking", changes: [], message: "" });
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenu>(null);
+  const [configEditorOpen, setConfigEditorOpen] = useState(false);
+  const [configData, setConfigData] = useState<any>(null);
+  const [configDirty, setConfigDirty] = useState(false);
+  const [configTab, setConfigTab] = useState("general");
+  const [configExternalChanged, setConfigExternalChanged] = useState(false);
+  // MCP config panel state
+  const [mcpEditorOpen, setMcpEditorOpen] = useState(false);
+  const [mcpConfig, setMcpConfig] = useState<{ servers: Record<string, any> }>({ servers: {} });
+  const [mcpDirty, setMcpDirty] = useState(false);
+  // Project copy state
+  const [copyProjectBusy, setCopyProjectBusy] = useState(false);
 
   const activeTab = tabs.find((tab) => tab.path === activePath) || null;
   const dirtyCount = tabs.filter((tab) => tab.content !== tab.savedContent).length;
   const flatFiles = useMemo(() => flattenFiles(files), [files]);
-  const modelOptions = useMemo(() => ollamaModels.map((model) => `ollama/${model}`), [ollamaModels]);
+  const modelOptions = useMemo(() => {
+    const ollama = ollamaModels.map((model) => `ollama/${model}`);
+    const v2 = v2Models.map((m) => `${m.providerID}/${m.id}`);
+    return [...new Set([...ollama, ...v2])];
+  }, [ollamaModels, v2Models]);
   const dynamicSlashCommands = useMemo(() => {
     const seen = new Set<string>();
     return [...slashCommands, ...engineSlashCommands(agentCommands)]
@@ -557,6 +652,44 @@ export function App() {
     }));
   }, [projectPath, tabs, toast]);
 
+  const refreshSkills = useCallback(async (workspace = projectPath) => {
+    if (!workspace) return;
+    try {
+      const bridge = api.opencode as OptionalOpenCodeBridge;
+      if (bridge.skills) {
+        setSkills((await withApiError(bridge.skills({ projectPath: workspace }), toast)) ?? []);
+      }
+    } catch {
+      setSkills([]);
+    }
+  }, [projectPath, toast]);
+
+  const refreshReferences = useCallback(async (workspace = projectPath) => {
+    if (!workspace) return;
+    try {
+      const bridge = api.opencode as OptionalOpenCodeBridge;
+      if (bridge.references) {
+        setReferences((await withApiError(bridge.references({ projectPath: workspace }), toast)) ?? []);
+      }
+    } catch {
+      setReferences([]);
+    }
+  }, [projectPath, toast]);
+
+  const loadSavedPermissions = useCallback(async () => {
+    try {
+      const bridge = api.opencode as OptionalOpenCodeBridge;
+      if (bridge.savedPermissions) {
+        const list = await bridge.savedPermissions({ projectPath });
+        if (Array.isArray(list)) {
+          setSavedPermissions(list);
+        }
+      }
+    } catch {
+      // silently ignore
+    }
+  }, [projectPath]);
+
   const refreshAgentSessions = useCallback(async (workspace = projectPath) => {
     if (!workspace || !api.opencode.sessions) return;
     try {
@@ -568,14 +701,31 @@ export function App() {
 
   const refreshAgentCapabilities = useCallback(async (workspace = projectPath) => {
     if (!workspace) return;
-    const [commands, providerState, providerAuth] = await Promise.all([
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    const [commands, providerState, providerAuth, modelsResult, agentsResult] = await Promise.all([
       withApiError(api.opencode.commands({ projectPath: workspace }), toast),
       withApiError(api.opencode.providerState({ projectPath: workspace }), toast),
-      withApiError(api.opencode.providerAuth({ projectPath: workspace }), toast)
+      withApiError(api.opencode.providerAuth({ projectPath: workspace }), toast),
+      bridge.models ? withApiError(bridge.models(undefined), toast) : Promise.resolve([]),
+      bridge.agents ? withApiError(bridge.agents({ projectPath: workspace }), toast) : Promise.resolve([])
     ]);
     setAgentCommands(commands ?? []);
     setAgentProviderState(providerState ?? { all: [], default: {}, connected: [] });
     setAgentProviderAuth(providerAuth ?? {});
+    const modelsArr = Array.isArray(modelsResult) ? modelsResult : (modelsResult && Array.isArray(modelsResult.models) ? modelsResult.models.map(function(m: string) { return { id: m, providerID: "ollama", name: m }; }) : []);
+    if (modelsArr.length > 0 && typeof modelsArr[0] === "object") {
+      setV2Models(modelsArr);
+    }
+    const agentsArr = Array.isArray(agentsResult) ? agentsResult : [];
+    if (agentsArr.length > 0) {
+      setAgentList(agentsArr);
+      setSelectedAgent(function(current) {
+        if (!current || !agentsArr.some(function(a) { return a.name === current; })) {
+          return agentsArr[0]?.name || "build";
+        }
+        return current;
+      });
+    }
   }, [projectPath, toast]);
 
   const openAgentSession = useCallback(async (sessionID: string) => {
@@ -607,7 +757,7 @@ export function App() {
     if (!projectPath) return;
     const bridge = api.opencode as OptionalOpenCodeBridge;
     if (bridge.startSession) {
-      const session = await bridge.startSession({ projectPath, model: effectiveModel });
+      const session = await bridge.startSession({ projectPath, model: effectiveModel, agent: selectedAgent });
       const sessionID = session.sessionID || session.id || "";
       if (sessionID) {
         setActiveAgentSessionId(sessionID);
@@ -624,7 +774,7 @@ export function App() {
     }]);
     setIsAgentOpen(true);
     setActiveActivity("ai");
-  }, [effectiveModel, projectPath]);
+  }, [effectiveModel, projectPath, selectedAgent]);
 
   const forkAgentSession = useCallback(async (sessionID = activeAgentSessionId, messageID = activeAgentMessageId) => {
     if (!projectPath || !sessionID) return;
@@ -680,10 +830,27 @@ export function App() {
     setProjectPath(nextProject);
     setOllamaOnline(status.online);
     setOpencodeVersion(info.installed ? info.version : "not installed");
+    // Fetch initial server health
+    try {
+      const health = await api.opencode.health(nextProject);
+      setServerHealth(health);
+      setLastHealthCheck(new Date().toLocaleTimeString());
+    } catch {
+      setServerHealth({ healthy: false });
+    }
+    try {
+      const location = await api.opencode.location(nextProject);
+      setServerLocation(location);
+    } catch {
+      setServerLocation(null);
+    }
     setFiles(await api.files.list(nextProject));
     await refreshGit(nextProject);
     await refreshAgentSessions(nextProject);
     await refreshAgentCapabilities(nextProject);
+    await refreshSkills(nextProject);
+    await refreshReferences(nextProject);
+    await loadSavedPermissions();
     if (status.online) {
       const models = await api.ollama.models();
       setOllamaModels(models);
@@ -704,7 +871,7 @@ export function App() {
     const validTabs: OpenTab[] = restoredTabs.filter((tab): tab is NonNullable<typeof tab> => Boolean(tab));
     setTabs(validTabs);
     setActivePath(saved.activePath && validTabs.some((tab) => tab.path === saved.activePath) ? saved.activePath : validTabs[0]?.path || "");
-  }, [refreshAgentCapabilities, refreshAgentSessions, refreshGit]);
+  }, [refreshAgentCapabilities, refreshAgentSessions, refreshGit, refreshSkills, refreshReferences, loadSavedPermissions]);
 
   useEffect(() => {
     boot().catch((error) => setAgentLog((log) => [`Startup failed: ${String(error)}`, ...log]));
@@ -730,6 +897,47 @@ export function App() {
         refreshFiles(projectPath);
         refreshGit(projectPath);
         refreshOpenTabsFromDisk(projectPath);
+        return;
+      }
+      // Q&A events
+      if (runtimeEvent.type === "question.asked") {
+        const bridge = api.opencode as OptionalOpenCodeBridge;
+        if (bridge.questionRequests) {
+          bridge.questionRequests({ projectPath }).then((questions: AgentQuestion[]) => {
+            if (Array.isArray(questions)) {
+              setPendingQuestions((prev) => {
+                const existing = new Set(prev.map((q) => q.id));
+                const newOnes = questions.filter((q: AgentQuestion) => !existing.has(q.id));
+                return [...prev, ...newOnes].slice(-20);
+              });
+            }
+          }).catch(() => {});
+        }
+        return;
+      }
+      if (runtimeEvent.type === "question.replied") {
+        setPendingQuestions((current) =>
+          current.map((q) =>
+            q.id === (runtimeEvent as any).questionID || q.requestID === (runtimeEvent as any).requestID
+              ? { ...q, status: "replied" }
+              : q
+          )
+        );
+        return;
+      }
+      // Permission saved events
+      if (runtimeEvent.type === "permission.saved") {
+        loadSavedPermissions();
+        return;
+      }
+      // Skills events
+      if (runtimeEvent.type === "skill.registered") {
+        refreshSkills(projectPath);
+        return;
+      }
+      // References events
+      if (runtimeEvent.type === "reference.updated") {
+        refreshReferences(projectPath);
         return;
       }
       setAgentMessages((messages) => messages.map((message) => {
@@ -767,7 +975,7 @@ export function App() {
       disposed = true;
       disposeEvent();
     };
-  }, [projectPath, refreshFiles, refreshGit, refreshOpenTabsFromDisk]);
+  }, [projectPath, refreshFiles, refreshGit, refreshOpenTabsFromDisk, refreshSkills, refreshReferences, loadSavedPermissions]);
 
   useEffect(() => {
     if (!projectPath) return;
@@ -789,6 +997,21 @@ export function App() {
     };
     window.localStorage.setItem(workspaceStateKey, JSON.stringify(state));
   }, [activeActivity, activePath, agentWidth, bottomHeight, bottomPanel, cursorPositions, isAgentOpen, isBottomOpen, isSidebarOpen, minimap, projectPath, selectedModel, sidebarWidth, tabs]);
+
+  // Periodic health polling
+  useEffect(() => {
+    if (!projectPath) return;
+    const interval = window.setInterval(async () => {
+      try {
+        const health = await api.opencode.health(projectPath);
+        setServerHealth(health);
+        setLastHealthCheck(new Date().toLocaleTimeString());
+      } catch {
+        setServerHealth({ healthy: false });
+      }
+    }, 30000);
+    return () => window.clearInterval(interval);
+  }, [projectPath]);
 
   useEffect(() => {
     const normalizeLayout = () => {
@@ -874,6 +1097,9 @@ export function App() {
     await refreshGit(nextProject);
     await refreshAgentSessions(nextProject);
     await refreshAgentCapabilities(nextProject);
+    await refreshSkills(nextProject);
+    await refreshReferences(nextProject);
+    await loadSavedPermissions();
   };
 
   const runSearch = useCallback(async () => {
@@ -1002,7 +1228,7 @@ export function App() {
       if (bridge.prompt) {
         let sessionID = activeAgentSessionId;
         if (!sessionID && bridge.startSession) {
-          const session = await bridge.startSession({ projectPath, model: effectiveModel });
+          const session = await bridge.startSession({ projectPath, model: effectiveModel, agent: selectedAgent });
           sessionID = session.sessionID || session.id || "";
           if (sessionID) setActiveAgentSessionId(sessionID);
         }
@@ -1010,9 +1236,11 @@ export function App() {
           projectPath,
           sessionID,
           model: effectiveModel,
+          agent: selectedAgent,
           prompt: fullPrompt,
           requestId,
           permissionMode,
+          permissionRules: permissionRulesForMode(granularPermissions),
           planMode
         });
         const nextSessionID = result.sessionID || sessionID;
@@ -1102,6 +1330,7 @@ export function App() {
     agentBusy,
     agentCommands,
     agentPermissionMode,
+    granularPermissions,
     agentPlanMode,
     agentPrompt,
     agentContextMode,
@@ -1113,6 +1342,7 @@ export function App() {
     refreshFiles,
     refreshGit,
     refreshOpenTabsFromDisk,
+    selectedAgent,
     selectedCode,
     tabs,
     terminalOutput
@@ -1133,6 +1363,45 @@ export function App() {
     )));
     setAgentLog((log) => [`Stopped session ${activeAgentSessionId}.`, ...log].slice(0, 30));
   }, [activeAgentSessionId, projectPath]);
+
+  const onSwitchModel = useCallback(async (model: string) => {
+    setSelectedModel(model);
+    if (activeAgentSessionId && projectPath) {
+      const bridge = api.opencode as OptionalOpenCodeBridge;
+      if (bridge.sessionSwitchModel) {
+        try {
+          const result = await bridge.sessionSwitchModel({ projectPath, sessionID: activeAgentSessionId, model });
+          if (result.ok) {
+            toast("Model switched to " + model, "success");
+          } else {
+            toast("Failed to switch model for active session", "error");
+          }
+        } catch (error) {
+          toast("Error switching model: " + (error instanceof Error ? error.message : String(error)), "error");
+        }
+      }
+    }
+  }, [activeAgentSessionId, projectPath, toast]);
+
+  const onSwitchAgent = useCallback(async (agent: string) => {
+    setSelectedAgent(agent);
+    if (activeAgentSessionId && projectPath) {
+      const bridge = api.opencode as OptionalOpenCodeBridge;
+      if (bridge.sessionSwitchAgent) {
+        try {
+          const result = await bridge.sessionSwitchAgent({ projectPath, sessionID: activeAgentSessionId, agent });
+          if (result.ok) {
+            toast("Agent switched to " + agent, "success");
+            setAgentActivityChips((chips) => [{ id: `agent-switch-${Date.now()}`, label: "agent: " + agent, tone: "info" as const, sessionID: activeAgentSessionId }, ...chips].slice(0, 10));
+          } else {
+            toast("Failed to switch agent for active session", "error");
+          }
+        } catch (error) {
+          toast("Error switching agent: " + (error instanceof Error ? error.message : String(error)), "error");
+        }
+      }
+    }
+  }, [activeAgentSessionId, projectPath, toast]);
 
   const continueAgent = useCallback(() => {
     submitAgentPrompt({ permissionMode: agentPermissionMode, planMode: agentPlanMode, promptOverride: "/continue" });
@@ -1157,6 +1426,28 @@ export function App() {
         : message
     )));
   }, [projectPath]);
+
+  const replyToQuestion = useCallback(async (question: AgentQuestion, reply: string) => {
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.questionReply || !question.sessionID || !question.requestID) return;
+    try {
+      await bridge.questionReply({ projectPath, sessionID: question.sessionID, requestID: question.requestID, reply });
+      setPendingQuestions((current) => current.filter((q) => q.id !== question.id));
+    } catch (error) {
+      toast('Failed to reply to question: ' + (error instanceof Error ? error.message : String(error)), 'error');
+    }
+  }, [projectPath, toast]);
+
+  const rejectQuestion_ = useCallback(async (question: AgentQuestion) => {
+    const bridge = api.opencode as OptionalOpenCodeBridge;
+    if (!bridge.questionReject || !question.sessionID || !question.requestID) return;
+    try {
+      await bridge.questionReject({ projectPath, sessionID: question.sessionID, requestID: question.requestID });
+      setPendingQuestions((current) => current.filter((q) => q.id !== question.id));
+    } catch (error) {
+      toast('Failed to reject question: ' + (error instanceof Error ? error.message : String(error)), 'error');
+    }
+  }, [projectPath, toast]);
 
   const revertAgentTurn = useCallback(async (sessionID?: string, messageID?: string) => {
     const targetSession = sessionID || activeAgentSessionId;
@@ -1193,6 +1484,44 @@ export function App() {
     ].filter(Boolean).join("\n\n"));
   }, [activePath, selectedCode]);
 
+  const loadConfigIntoEditor = useCallback(async () => {
+    if (!projectPath) return;
+    try {
+      const bridge = api.opencode as any;
+      if (bridge.readConfig) {
+        const result = await bridge.readConfig({ projectPath });
+        if (result.ok) {
+          setConfigData(result.config);
+          setConfigDirty(false);
+          setConfigExternalChanged(false);
+          setConfigTab("general");
+        } else {
+          toast("Failed to load config: " + (result.error || "Unknown error"), "error");
+        }
+      }
+    } catch (error) {
+      toast("Error loading config: " + (error instanceof Error ? error.message : String(error)), "error");
+    }
+  }, [projectPath, toast]);
+
+  const loadMCPConfig = useCallback(async () => {
+    if (!projectPath) return;
+    try {
+      const bridge = api.opencode as any;
+      if (bridge.readMCPConfig) {
+        const result = await bridge.readMCPConfig({ projectPath });
+        if (result.ok) {
+          setMcpConfig(result.mcpConfig || { servers: {} });
+          setMcpDirty(false);
+        } else {
+          toast("Failed to load MCP config: " + (result.error || "Unknown error"), "error");
+        }
+      }
+    } catch (error) {
+      toast("Error loading MCP config: " + (error instanceof Error ? error.message : String(error)), "error");
+    }
+  }, [projectPath, toast]);
+
   const commands = useMemo(() => [
     { id: "file.open", label: "File: Open Folder", detail: "Open a workspace folder", run: openProject },
     { id: "file.new", label: "File: New File", detail: "Create a file in this workspace", run: createFile },
@@ -1210,13 +1539,117 @@ export function App() {
     { id: "ai.tests", label: "AI: Generate Tests", detail: "Create test suggestions", run: () => startAiAction("Generate tests for this code") },
     { id: "terminal.open", label: "Terminal: Focus Terminal", detail: "Ctrl+`", run: () => { setIsBottomOpen(true); setBottomPanel("terminal"); } },
     { id: "git.refresh", label: "Git: Refresh Source Control", detail: "Read git status", run: () => refreshGit(projectPath) },
-    { id: "settings.minimap", label: `Editor: ${minimap ? "Hide" : "Show"} Minimap`, detail: "Toggle minimap", run: () => setMinimap((value) => !value) }
-  ], [minimap, openAgent, projectPath, refreshGit, startAiAction]);
+    { id: "settings.minimap", label: `Editor: ${minimap ? "Hide" : "Show"} Minimap`, detail: "Toggle minimap", run: () => setMinimap((value) => !value) },
+    { id: "config.open", label: "Code: Open Configuration", detail: "Edit opencode.json", run: () => { loadConfigIntoEditor(); setConfigEditorOpen(true); } },
+    // MCP Config
+    { id: "mcp.open", label: "MCP: Configure Servers", detail: "Manage MCP server definitions", run: () => { loadMCPConfig(); setMcpEditorOpen(true); } },
+    // Project copy
+    { id: "project.copy", label: "Project: Copy", detail: "Duplicate the current project", run: async () => {
+      if (!projectPath) return;
+      const destPath = window.prompt("Destination path for copied project", projectPath + "-copy");
+      if (!destPath) return;
+      setCopyProjectBusy(true);
+      try {
+        const bridge = api.opencode as any;
+        if (bridge.copyProject) {
+          const result = await bridge.copyProject({ sourcePath: projectPath, destPath });
+          if (result.ok) {
+            toast("Project copied to " + destPath, "success");
+            setOutputLog((log) => [`Project copied from ${projectPath} to ${destPath}`, ...log].slice(0, 20));
+          } else {
+            toast("Failed to copy project: " + (result.error || "Unknown error"), "error");
+          }
+        }
+      } catch (error) {
+        toast("Error copying project: " + (error instanceof Error ? error.message : String(error)), "error");
+      } finally {
+        setCopyProjectBusy(false);
+      }
+    } },
+    // CLI commands
+    { id: "cli.start", label: "CLI: Start Coding Session", detail: "Run the Code CLI in the current project", run: async () => {
+      if (!projectPath) return;
+      try {
+        const bridge = api.opencode as any;
+        if (bridge.cli) {
+          const result = await bridge.cli({ projectPath, args: ["run", projectPath] });
+          const block = commandBlock("code run", result);
+          setOutputLog((log) => [block, ...log].slice(0, 20));
+          setCommandEvent({ id: uid(), text: block });
+          toast("CLI: Start session " + (result.ok ? "succeeded" : "failed"), result.ok ? "success" : "error");
+        }
+      } catch (error) {
+        toast("CLI error: " + (error instanceof Error ? error.message : String(error)), "error");
+      }
+    } },
+    { id: "cli.install", label: "CLI: Install Dependencies", detail: "Install project dependencies via CLI", run: async () => {
+      if (!projectPath) return;
+      try {
+        const bridge = api.opencode as any;
+        if (bridge.cli) {
+          const result = await bridge.cli({ projectPath, args: ["install"] });
+          const block = commandBlock("code install", result);
+          setOutputLog((log) => [block, ...log].slice(0, 20));
+          setCommandEvent({ id: uid(), text: block });
+          toast("CLI: Install " + (result.ok ? "succeeded" : "failed"), result.ok ? "success" : "error");
+        }
+      } catch (error) {
+        toast("CLI error: " + (error instanceof Error ? error.message : String(error)), "error");
+      }
+    } },
+    { id: "cli.update", label: "CLI: Check for Updates", detail: "Check for Code engine updates", run: async () => {
+      if (!projectPath) return;
+      try {
+        const bridge = api.opencode as any;
+        if (bridge.cli) {
+          const result = await bridge.cli({ projectPath, args: ["update", "--check"] });
+          const block = commandBlock("code update --check", result);
+          setOutputLog((log) => [block, ...log].slice(0, 20));
+          setCommandEvent({ id: uid(), text: block });
+          toast("CLI: Update check " + (result.ok ? "succeeded" : "failed"), result.ok ? "success" : "error");
+        }
+      } catch (error) {
+        toast("CLI error: " + (error instanceof Error ? error.message : String(error)), "error");
+      }
+    } },
+    { id: "cli.models", label: "CLI: List Models", detail: "List available models via CLI", run: async () => {
+      if (!projectPath) return;
+      try {
+        const bridge = api.opencode as any;
+        if (bridge.cli) {
+          const result = await bridge.cli({ projectPath, args: ["models"] });
+          const block = commandBlock("code models", result);
+          setOutputLog((log) => [block, ...log].slice(0, 20));
+          setCommandEvent({ id: uid(), text: block });
+        }
+      } catch (error) {
+        toast("CLI error: " + (error instanceof Error ? error.message : String(error)), "error");
+      }
+    } }
+  ], [loadConfigIntoEditor, loadMCPConfig, minimap, openAgent, projectPath, refreshGit, startAiAction, toast, setOutputLog, setCommandEvent]);
 
   function openOverlay(mode: Exclude<OverlayMode, null>) {
     setOverlayMode(mode);
     setOverlayQuery("");
   }
+
+  const saveMCPConfig = useCallback(async () => {
+    if (!projectPath) return;
+    try {
+      const bridge = api.opencode as any;
+      if (bridge.writeMCPConfig) {
+        const result = await bridge.writeMCPConfig({ projectPath, mcpConfig });
+        if (result.ok) {
+          toast("MCP configuration saved", "success");
+          setMcpDirty(false);
+        } else {
+          toast("Failed to save MCP config: " + (result.error || "Unknown error"), "error");
+        }
+      }
+    } catch (error) {
+      toast("Error saving MCP config: " + (error instanceof Error ? error.message : String(error)), "error");
+    }
+  }, [projectPath, mcpConfig, toast]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1358,6 +1791,13 @@ export function App() {
         <ActivityButton active={activeActivity === "debug"} title="Run and Debug" onClick={() => { setActiveActivity("debug"); setIsSidebarOpen(true); }} icon={<Bug size={20} />} />
         <ActivityButton active={activeActivity === "extensions"} title="Extensions" onClick={() => { setActiveActivity("extensions"); setIsSidebarOpen(true); }} icon={<Boxes size={20} />} />
         <ActivityButton active={activeActivity === "ai"} title="AI" onClick={() => { setActiveActivity("ai"); setIsAgentOpen(true); }} icon={<Bot size={20} />} />
+        <div className="activity-bar-spacer" />
+        <button className="activity-button settings-button" title="Settings" onClick={() => { loadConfigIntoEditor(); setConfigEditorOpen(true); }}>
+          <Settings2 size={20} />
+        </button>
+        <button className="activity-button permissions-button" title="Saved Permissions" onClick={() => { loadConfigIntoEditor(); setConfigEditorOpen(true); }}>
+          <ShieldCheck size={20} />
+        </button>
       </aside>
 
       {isSidebarOpen ? (
@@ -1532,6 +1972,20 @@ export function App() {
               slashItems={dynamicSlashCommands}
               permissionMode={agentPermissionMode}
               setPermissionMode={setAgentPermissionMode}
+              granularPermissions={granularPermissions}
+              setGranularPermissions={setGranularPermissions}
+              savedPermissions={savedPermissions}
+              onRevokeSavedPermission={async (id: string) => {
+                try {
+                  const bridge = api.opencode as OptionalOpenCodeBridge;
+                  if (bridge.deleteSavedPermission) {
+                    await bridge.deleteSavedPermission({ projectPath, id });
+                    setSavedPermissions((prev) => prev.filter((p) => p.id !== id));
+                  }
+                } catch {
+                  // silently ignore
+                }
+              }}
               planMode={agentPlanMode}
               setPlanMode={setAgentPlanMode}
               contextMode={agentContextMode}
@@ -1546,7 +2000,19 @@ export function App() {
               onNewSession={startNewAgentSession}
               onForkSession={forkAgentSession}
               onPermissionReply={replyAgentPermission}
+              agentList={agentList}
+              selectedAgent={selectedAgent}
+              onSwitchAgent={onSwitchAgent}
               onRevert={revertAgentTurn}
+              pendingQuestions={pendingQuestions}
+              skills={skills}
+              references={references}
+              skillsOpen={skillsOpen}
+              setSkillsOpen={setSkillsOpen}
+              referencesOpen={referencesOpen}
+              setReferencesOpen={setReferencesOpen}
+              onReplyToQuestion={replyToQuestion}
+              onRejectQuestion={rejectQuestion_}
               onClose={() => setIsAgentOpen(false)}
             />
           ) : null}
@@ -1560,6 +2026,20 @@ export function App() {
         <span>{gitState.ok ? gitState.branch : "no git"}</span>
         <span className={ollamaOnline ? "ok" : "warn"}>{ollamaOnline ? `${ollamaModels.length} Ollama models` : "Ollama offline"}</span>
         <span>{effectiveModel || "No model selected"}</span>
+        <span
+          className={`server-health ${serverHealth.healthy ? "healthy" : "unhealthy"}`}
+          title={serverHealth.healthy
+            ? `Server URL: ${serverLocation?.url || "unknown"}
+${serverHealth.uptime ? `Uptime: ${serverHealth.uptime}` : ""}
+${serverLocation?.port ? `Port: ${serverLocation.port}` : ""}
+${lastHealthCheck ? `Last check: ${lastHealthCheck}` : ""}`
+            : "Engine is offline"}
+        >
+          <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: "50%", backgroundColor: serverHealth.healthy ? "#4caf50" : "#f44336", marginRight: 4 }} />
+          {serverHealth.healthy ? "Engine running" : "Engine offline"}
+          {opencodeVersion ? ` v${opencodeVersion}` : ""}
+          {lastHealthCheck ? ` (${lastHealthCheck})` : ""}
+        </span>
       </footer>
 
       {overlayMode ? (
@@ -1592,9 +2072,458 @@ export function App() {
           close={() => setFileContextMenu(null)}
         />
       ) : null}
+
+      {configEditorOpen && configData ? (
+        <ConfigEditorPanel
+          configData={configData}
+          setConfigData={setConfigData}
+          configDirty={configDirty}
+          setConfigDirty={setConfigDirty}
+          configTab={configTab}
+          setConfigTab={setConfigTab}
+          configExternalChanged={configExternalChanged}
+          setConfigExternalChanged={setConfigExternalChanged}
+          projectPath={projectPath}
+          modelOptions={modelOptions}
+          api={api}
+          toast={toast}
+          onClose={() => setConfigEditorOpen(false)}
+          onRefresh={() => {
+            loadConfigIntoEditor();
+            refreshAgentCapabilities(projectPath);
+          }}
+        />
+      ) : null}
+
+      {mcpEditorOpen ? (
+        <MCPConfigPanel
+          mcpConfig={mcpConfig}
+          setMcpConfig={setMcpConfig}
+          mcpDirty={mcpDirty}
+          setMcpDirty={setMcpDirty}
+          projectPath={projectPath}
+          onSave={saveMCPConfig}
+          onClose={() => setMcpEditorOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
+
+
+function ConfigEditorPanel({
+  configData,
+  setConfigData,
+  configDirty,
+  setConfigDirty,
+  configTab,
+  setConfigTab,
+  configExternalChanged,
+  setConfigExternalChanged,
+  projectPath,
+  modelOptions,
+  api,
+  toast,
+  onClose,
+  onRefresh
+}: {
+  configData: any;
+  setConfigData: (value: any) => void;
+  configDirty: boolean;
+  setConfigDirty: (value: boolean) => void;
+  configTab: string;
+  setConfigTab: (value: string) => void;
+  configExternalChanged: boolean;
+  setConfigExternalChanged: (value: boolean) => void;
+  projectPath: string;
+  modelOptions: string[];
+  api: any;
+  toast: (message: string, type: "success" | "error" | "info") => void;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  const [jsonText, setJsonText] = useState("");
+  const [editorMode, setEditorMode] = useState(false);
+
+  const syncJsonToConfig = useCallback(() => {
+    try {
+      const parsed = JSON.parse(jsonText);
+      setConfigData(parsed);
+      setConfigDirty(true);
+      toast("JSON parsed successfully", "info");
+    } catch (error) {
+      toast("Invalid JSON: " + (error instanceof Error ? error.message : String(error)), "error");
+    }
+  }, [jsonText, setConfigData, setConfigDirty, toast]);
+
+  const handleSave = useCallback(async () => {
+    if (!projectPath) return;
+    try {
+      const bridge = api.opencode as any;
+      if (bridge.writeConfig) {
+        const result = await bridge.writeConfig({ projectPath, config: configData });
+        if (result.ok) {
+          toast("Configuration saved", "success");
+          setConfigDirty(false);
+          onRefresh();
+        } else {
+          toast("Failed to save: " + (result.error || "Unknown error"), "error");
+        }
+      }
+    } catch (error) {
+      toast("Error saving config: " + (error instanceof Error ? error.message : String(error)), "error");
+    }
+  }, [projectPath, configData, api, toast, setConfigDirty, onRefresh]);
+
+  const formatJson = useCallback(() => {
+    try {
+      const formatted = JSON.stringify(configData, null, 2);
+      setJsonText(formatted);
+    } catch {
+      toast("Could not format config", "error");
+    }
+  }, [configData, setJsonText, toast]);
+
+  const addProvider = useCallback(() => {
+    const name = window.prompt("Provider name (e.g., openai, anthropic)");
+    if (!name) return;
+    const providers = { ...(configData.providers || configData.provider || {}), [name]: { name, npm: "@ai-sdk/openai-compatible", options: { baseURL: "" }, models: {} } };
+    setConfigData({ ...configData, providers, provider: providers });
+    setConfigDirty(true);
+  }, [configData, setConfigData, setConfigDirty]);
+
+  const removeProvider = useCallback((name: string) => {
+    if (!window.confirm(`Remove provider "${name}"?`)) return;
+    const providers = { ...(configData.providers || configData.provider || {}) };
+    delete providers[name];
+    setConfigData({ ...configData, providers, provider: providers });
+    setConfigDirty(true);
+  }, [configData, setConfigData, setConfigDirty]);
+
+  const addAgent = useCallback(() => {
+    const name = window.prompt("Agent name");
+    if (!name) return;
+    const agents = [...(configData.agents || []), { name, model: "", prompt: "", tools: [] }];
+    setConfigData({ ...configData, agents });
+    setConfigDirty(true);
+  }, [configData, setConfigDirty]);
+
+  const removeAgent = useCallback((index: number) => {
+    if (!window.confirm("Remove this agent?")) return;
+    const agents = [...(configData.agents || [])];
+    agents.splice(index, 1);
+    setConfigData({ ...configData, agents });
+    setConfigDirty(true);
+  }, [configData, setConfigDirty]);
+
+  const addRule = useCallback(() => {
+    const rules = [...(configData.rules || configData.permissions || []), { action: "read", resource: "*", effect: "allow", description: "" }];
+    setConfigData({ ...configData, rules, permissions: rules });
+    setConfigDirty(true);
+  }, [configData, setConfigDirty]);
+
+  const removeRule = useCallback((index: number) => {
+    if (!window.confirm("Remove this rule?")) return;
+    const rules = [...(configData.rules || configData.permissions || [])];
+    rules.splice(index, 1);
+    setConfigData({ ...configData, rules, permissions: rules });
+    setConfigDirty(true);
+  }, [configData, setConfigDirty]);
+
+  const providers = configData.providers || configData.provider || {};
+  const providersList = Object.keys(providers);
+  const agentsList = configData.agents || [];
+  const rulesList = configData.rules || configData.permissions || [];
+  const defaultModel = configData.model || configData.default_model || "";
+  const smallModel = configData.small_model || "";
+
+  return (
+    <div className="overlay config-editor-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="config-editor-panel">
+        <div className="config-editor-header">
+          <h2>Configuration Editor</h2>
+          <div className="config-editor-actions">
+            {configExternalChanged ? (
+              <button className="config-action-button warn" onClick={onRefresh}>
+                <RefreshCw size={14} /> Config changed externally - Reload
+              </button>
+            ) : null}
+            {configDirty ? <span className="config-dirty-badge">Unsaved changes</span> : null}
+            <button className="config-action-button primary" onClick={handleSave} disabled={!configDirty}>
+              <Save size={14} /> Save
+            </button>
+            <button className="config-action-button" onClick={onClose}>Cancel</button>
+            <button className="icon-button" onClick={onClose}><X size={18} /></button>
+          </div>
+        </div>
+
+        <div className="config-editor-tabs">
+          <button className={configTab === "general" ? "active" : ""} onClick={() => setConfigTab("general")}>General</button>
+          <button className={configTab === "providers" ? "active" : ""} onClick={() => setConfigTab("providers")}>Providers</button>
+          <button className={configTab === "agents" ? "active" : ""} onClick={() => setConfigTab("agents")}>Agents</button>
+          <button className={configTab === "rules" ? "active" : ""} onClick={() => setConfigTab("rules")}>Rules</button>
+          <button className={configTab === "json" ? "active" : ""} onClick={() => { setConfigTab("json"); formatJson(); }}>JSON</button>
+        </div>
+
+        <div className="config-editor-body">
+          {configTab === "general" && (
+            <div className="config-tab-content">
+              <div className="config-field">
+                <label>Default Model</label>
+                <select
+                  value={defaultModel}
+                  onChange={(e) => {
+                    setConfigData({ ...configData, model: e.target.value, default_model: e.target.value });
+                    setConfigDirty(true);
+                  }}
+                >
+                  <option value="">None selected</option>
+                  {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div className="config-field">
+                <label>Small Model</label>
+                <select
+                  value={smallModel}
+                  onChange={(e) => {
+                    setConfigData({ ...configData, small_model: e.target.value });
+                    setConfigDirty(true);
+                  }}
+                >
+                  <option value="">None selected</option>
+                  {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+            </div>
+          )}
+
+          {configTab === "providers" && (
+            <div className="config-tab-content">
+              <div className="config-section-header">
+                <span>Configured Providers ({providersList.length})</span>
+                <button className="config-action-button primary" onClick={addProvider}>+ Add Provider</button>
+              </div>
+              {providersList.length === 0 ? (
+                <div className="config-empty-state">No providers configured. Click "Add Provider" to add one.</div>
+              ) : (
+                <div className="config-list">
+                  {providersList.map((name) => {
+                    const provider = providers[name];
+                    return (
+                      <div key={name} className="config-list-item">
+                        <div className="config-item-header">
+                          <strong>{name}</strong>
+                          <button className="icon-button danger" onClick={() => removeProvider(name)}><Trash2 size={14} /></button>
+                        </div>
+                        <div className="config-item-details">
+                          <div className="config-field compact">
+                            <label>NPM Package</label>
+                            <input value={provider.npm || ""} onChange={(e) => {
+                              const updated = { ...providers, [name]: { ...provider, npm: e.target.value } };
+                              setConfigData({ ...configData, providers: updated, provider: updated });
+                              setConfigDirty(true);
+                            }} />
+                          </div>
+                          <div className="config-field compact">
+                            <label>Base URL</label>
+                            <input value={provider.options?.baseURL || ""} onChange={(e) => {
+                              const updated = { ...providers, [name]: { ...provider, options: { ...provider.options, baseURL: e.target.value } } };
+                              setConfigData({ ...configData, providers: updated, provider: updated });
+                              setConfigDirty(true);
+                            }} />
+                          </div>
+                          <div className="config-field compact">
+                            <label>API Key</label>
+                            <input
+                              type="password"
+                              placeholder="Enter API key (stored separately)"
+                              value=""
+                              onFocus={(e) => {
+                                e.target.value = "";
+                              }}
+                              onBlur={(e) => {
+                                if (e.target.value) {
+                                  const bridge = api.opencode as any;
+                                  if (bridge.providerApiKey) {
+                                    bridge.providerApiKey({ projectPath, providerID: name, key: e.target.value }).then(() => {
+                                      toast("API key saved for " + name, "success");
+                                    }).catch(() => {
+                                      toast("API key save failed (may require engine running)", "error");
+                                    });
+                                  }
+                                }
+                              }}
+                            />
+                          </div>
+                          <div className="config-item-meta">
+                            <span>Models: {Object.keys(provider.models || {}).length}</span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {configTab === "agents" && (
+            <div className="config-tab-content">
+              <div className="config-section-header">
+                <span>Configured Agents ({agentsList.length})</span>
+                <button className="config-action-button primary" onClick={addAgent}>+ Add Agent</button>
+              </div>
+              {agentsList.length === 0 ? (
+                <div className="config-empty-state">No agents configured. Click "Add Agent" to add one.</div>
+              ) : (
+                <div className="config-list">
+                  {agentsList.map((agent: any, index: number) => (
+                    <div key={index} className="config-list-item">
+                      <div className="config-item-header">
+                        <strong>{agent.name || "Unnamed Agent"}</strong>
+                        <button className="icon-button danger" onClick={() => removeAgent(index)}><Trash2 size={14} /></button>
+                      </div>
+                      <div className="config-item-details">
+                        <div className="config-field compact">
+                          <label>Model</label>
+                          <select value={agent.model || ""} onChange={(e) => {
+                            const updated = [...agentsList];
+                            updated[index] = { ...updated[index], model: e.target.value };
+                            setConfigData({ ...configData, agents: updated });
+                            setConfigDirty(true);
+                          }}>
+                            <option value="">Default model</option>
+                            {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+                          </select>
+                        </div>
+                        <div className="config-field compact">
+                          <label>Prompt</label>
+                          <textarea
+                            rows={3}
+                            value={agent.prompt || ""}
+                            onChange={(e) => {
+                              const updated = [...agentsList];
+                              updated[index] = { ...updated[index], prompt: e.target.value };
+                              setConfigData({ ...configData, agents: updated });
+                              setConfigDirty(true);
+                            }}
+                          />
+                        </div>
+                        <div className="config-field compact">
+                          <label>Tools</label>
+                          <input
+                            value={Array.isArray(agent.tools) ? agent.tools.join(", ") : (agent.tools || "")}
+                            placeholder="read, edit, bash, glob, grep, list, webfetch"
+                            onChange={(e) => {
+                              const tools = e.target.value.split(/,\s*/).filter(Boolean);
+                              const updated = [...agentsList];
+                              updated[index] = { ...updated[index], tools };
+                              setConfigData({ ...configData, agents: updated });
+                              setConfigDirty(true);
+                            }}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {configTab === "rules" && (
+            <div className="config-tab-content">
+              <div className="config-section-header">
+                <span>Permission Rules ({rulesList.length})</span>
+                <button className="config-action-button primary" onClick={addRule}>+ Add Rule</button>
+              </div>
+              {rulesList.length === 0 ? (
+                <div className="config-empty-state">No rules configured. Add rules to control agent permissions.</div>
+              ) : (
+                <div className="config-list">
+                  {rulesList.map((rule: any, index: number) => (
+                    <div key={index} className="config-list-item rule-item">
+                      <div className="config-item-header">
+                        <strong>{rule.action || rule.permission || "action"}: {rule.resource || rule.pattern || "*"}</strong>
+                        <div className="config-item-actions">
+                          <span className={`rule-effect effect-${rule.effect || "allow"}`}>{rule.effect || "allow"}</span>
+                          <button className="icon-button danger" onClick={() => removeRule(index)}><Trash2 size={14} /></button>
+                        </div>
+                      </div>
+                      <div className="config-item-details">
+                        <div className="config-field compact inline">
+                          <label>Action</label>
+                          <select value={rule.action || rule.permission || "read"} onChange={(e) => {
+                            const updated = [...rulesList];
+                            updated[index] = { ...updated[index], action: e.target.value, permission: e.target.value };
+                            setConfigData({ ...configData, rules: updated, permissions: updated });
+                            setConfigDirty(true);
+                          }}>
+                            {["read", "edit", "glob", "grep", "list", "bash", "task", "external_directory", "lsp", "skill", "todowrite", "webfetch", "websearch"].map((a) => (
+                              <option key={a} value={a}>{a}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="config-field compact inline">
+                          <label>Effect</label>
+                          <select value={rule.effect || "allow"} onChange={(e) => {
+                            const updated = [...rulesList];
+                            updated[index] = { ...updated[index], effect: e.target.value };
+                            setConfigData({ ...configData, rules: updated, permissions: updated });
+                            setConfigDirty(true);
+                          }}>
+                            <option value="allow">allow</option>
+                            <option value="ask">ask</option>
+                            <option value="deny">deny</option>
+                          </select>
+                        </div>
+                        <div className="config-field compact">
+                          <label>Resource Pattern</label>
+                          <input value={rule.resource || rule.pattern || "*"} onChange={(e) => {
+                            const updated = [...rulesList];
+                            updated[index] = { ...updated[index], resource: e.target.value, pattern: e.target.value };
+                            setConfigData({ ...configData, rules: updated, permissions: updated });
+                            setConfigDirty(true);
+                          }} />
+                        </div>
+                        <div className="config-field compact">
+                          <label>Description</label>
+                          <input value={rule.description || ""} onChange={(e) => {
+                            const updated = [...rulesList];
+                            updated[index] = { ...updated[index], description: e.target.value };
+                            setConfigData({ ...configData, rules: updated, permissions: updated });
+                            setConfigDirty(true);
+                          }} />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {configTab === "json" && (
+            <div className="config-tab-content json-editor-tab">
+              <div className="config-section-header">
+                <span>Raw JSON Editor</span>
+                <button className="config-action-button" onClick={formatJson}>Format</button>
+                <button className="config-action-button primary" onClick={syncJsonToConfig}>Apply JSON</button>
+              </div>
+              <textarea
+                className="config-json-textarea"
+                value={jsonText}
+                onChange={(e) => setJsonText(e.target.value)}
+                spellCheck={false}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function startResize(type: "sidebar" | "agent" | "bottom", setter: (value: number | ((current: number) => number)) => void) {
   return (event: ReactMouseEvent) => {
@@ -1932,6 +2861,10 @@ function AgentPanel({
   slashItems,
   permissionMode,
   setPermissionMode,
+  granularPermissions,
+  setGranularPermissions,
+  savedPermissions,
+  onRevokeSavedPermission,
   planMode,
   setPlanMode,
   contextMode,
@@ -1946,7 +2879,18 @@ function AgentPanel({
   onNewSession,
   onForkSession,
   onPermissionReply,
-  onRevert,
+  agentList,
+  selectedAgent,
+  onSwitchAgent,
+  pendingQuestions,
+  skills,
+  references,
+  skillsOpen,
+  setSkillsOpen,
+  referencesOpen,
+  setReferencesOpen,
+  onReplyToQuestion,
+  onRejectQuestion,
   onClose
 }: {
   modelOptions: string[];
@@ -1973,6 +2917,10 @@ function AgentPanel({
   slashItems: Array<{ command: string; label: string; prompt: string; source?: string; hints?: string[] }>;
   permissionMode: string;
   setPermissionMode: (value: string) => void;
+  granularPermissions: Record<string, "allow" | "ask" | "deny">;
+  setGranularPermissions: (value: Record<string, "allow" | "ask" | "deny"> | ((prev: Record<string, "allow" | "ask" | "deny">) => Record<string, "allow" | "ask" | "deny">)) => void;
+  savedPermissions: SavedPermission[];
+  onRevokeSavedPermission: (id: string) => void;
   planMode: boolean;
   setPlanMode: (value: boolean | ((current: boolean) => boolean)) => void;
   contextMode: AgentContextMode;
@@ -1987,7 +2935,19 @@ function AgentPanel({
   onNewSession: () => void;
   onForkSession: (sessionID?: string, messageID?: string) => void;
   onPermissionReply: (sessionID: string, permission: AgentPermissionRequest, reply: "once" | "always" | "reject") => void;
+  agentList: Array<{ name: string; mode?: string; description?: string }>;
+  selectedAgent: string;
+  onSwitchAgent: (agent: string) => void;
   onRevert: (sessionID?: string, messageID?: string) => void;
+  pendingQuestions: AgentQuestion[];
+  skills: SkillInfo[];
+  references: ReferenceInfo[];
+  skillsOpen: boolean;
+  setSkillsOpen: (value: boolean | ((current: boolean) => boolean)) => void;
+  referencesOpen: boolean;
+  setReferencesOpen: (value: boolean | ((current: boolean) => boolean)) => void;
+  onReplyToQuestion: (question: AgentQuestion, reply: string) => void;
+  onRejectQuestion: (question: AgentQuestion) => void;
   onClose: () => void;
 }) {
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
@@ -1996,7 +2956,10 @@ function AgentPanel({
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
   const [providerNotice, setProviderNotice] = useState("");
-  const modelLabel = selectedModel ? selectedModel.replace(/^ollama\//, "") : (ollamaOnline ? "Choose model" : "Ollama offline");
+  const [activeOAuthAttempt, setActiveOAuthAttempt] = useState<OAuthAttempt | null>(null);
+  const [providerCredentials, setProviderCredentials] = useState<Record<string, CredentialInfo[]>>({});
+  const modelLabel = selectedModel ? selectedModel.split("/").pop() || selectedModel : (ollamaOnline ? "Choose model" : "Ollama offline");
+  const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const connectedProviders = new Set(agentProviderState.connected || []);
   const providerCount = agentProviderState.all.length || (ollamaOnline ? 1 : 0);
   const authProviderCount = Object.keys(agentProviderAuth || {}).length;
@@ -2006,37 +2969,74 @@ function AgentPanel({
     setModelMenuOpen(menu === "model" ? (value) => !value : false);
     setProviderMenuOpen(false);
     setSessionMenuOpen(false);
+    setAgentMenuOpen(false);
   };
   const visibleSlashCommands = agentPrompt.trim().startsWith("/")
     ? slashItems.filter((item) => item.command.includes(agentPrompt.trim().split(/\s+/)[0])).slice(0, 10)
     : [];
   const visibleActivityChips = compactActivityChips(activityChips);
   const connectProvider = async (providerID: string) => {
-    const methods = agentProviderAuth[providerID] || [];
-    const apiMethodIndex = methods.findIndex((method) => method.type === "api");
-    const oauthMethodIndex = methods.findIndex((method) => method.type === "oauth");
+    // Find auth methods from the provider state (v2 integration info)
+    const providerInfo = (agentProviderState.all || []).find(function(p) { return p.id === providerID || p.name === providerID; });
+    const authMethods = (providerInfo as IntegrationInfo)?.auth || agentProviderAuth[providerID] || [];
+    const apiMethod = authMethods.find(function(m) { return m.type === "key" || m.type === "api"; });
+    const oauthMethod = authMethods.find(function(m) { return m.type === "oauth"; });
     try {
-      if (apiMethodIndex >= 0) {
-        const key = window.prompt(`Enter API key for ${providerID}`);
+      if (apiMethod) {
+        const key = window.prompt(`Enter API key for \${providerID}`);
         if (!key) return;
-        await api.opencode.providerApiKey({ projectPath, providerID, key });
-        setProviderNotice(`${providerID} API key saved.`);
+        const bridge = api.opencode as any;
+        if (bridge.integrations) {
+          await bridge.providerApiKey({ projectPath, providerID, key });
+        } else {
+          await api.opencode.providerApiKey({ projectPath, providerID, key });
+        }
+        setProviderNotice(`\${providerID} API key saved.`);
         onRefreshOllama();
         return;
       }
-      if (oauthMethodIndex >= 0) {
-        const auth = await api.opencode.providerAuthorize({ projectPath, providerID, method: oauthMethodIndex });
+      if (oauthMethod) {
+        const bridge = api.opencode as any;
+        // Try v2 authorize with OAuth attempt tracking
+        if (bridge.integrations) {
+          const auth = await bridge.providerAuthorize({ projectPath, providerID, method: 0 });
+          if (auth?.url) {
+            setActiveOAuthAttempt({ attemptID: auth.attemptID || "", url: auth.url, method: auth.method || "oauth", status: "pending" });
+            window.open(auth.url, "_blank", "noopener,noreferrer");
+            setProviderNotice(`\${providerID} OAuth flow started. Complete auth in the browser.`);
+            // Start polling the attempt
+            const pollTimer = window.setInterval(async function() {
+              if (!auth.attemptID) { window.clearInterval(pollTimer); return; }
+              try {
+                const status = await bridge.oauthAttemptPoll({ projectPath, attemptID: auth.attemptID });
+                if (status && (status.status === "completed" || status.status === "connected")) {
+                  window.clearInterval(pollTimer);
+                  setActiveOAuthAttempt(null);
+                  setProviderNotice(`\${providerID} connected via OAuth.`);
+                  onRefreshOllama();
+                } else if (status && (status.status === "failed" || status.status === "error")) {
+                  window.clearInterval(pollTimer);
+                  setActiveOAuthAttempt(null);
+                  setProviderNotice(`\${providerID} OAuth failed: \${status.error || status.status}`);
+                }
+              } catch (_e) { /* poll error */ }
+            }, 2000);
+            return;
+          }
+        }
+        // Fallback to legacy OAuth flow
+        const auth = await api.opencode.providerAuthorize({ projectPath, providerID, method: 0 });
         if (auth?.url) window.open(auth.url, "_blank", "noopener,noreferrer");
         if (auth?.method === "code") {
-          const code = window.prompt(auth.instructions || `Paste ${providerID} authorization code`);
-          if (code) await api.opencode.providerCallback({ projectPath, providerID, method: oauthMethodIndex, code });
+          const code = window.prompt((auth as any).instructions || `Paste \${providerID} authorization code`);
+          if (code) await api.opencode.providerCallback({ projectPath, providerID, method: 0, code });
         }
-        setProviderNotice(auth?.instructions || `${providerID} OAuth flow started.`);
+        setProviderNotice((auth as any)?.instructions || `\${providerID} OAuth flow started.`);
         onRefreshOllama();
         return;
       }
-      setAgentPrompt(`/connect ${providerID}`);
-      setProviderNotice(`No direct auth form for ${providerID}. Added /connect command to composer.`);
+      setAgentPrompt(`/connect \${providerID}`);
+      setProviderNotice(`No direct auth form for \${providerID}. Added /connect command to composer.`);
     } catch (error) {
       setProviderNotice(error instanceof Error ? error.message : String(error));
     }
@@ -2101,25 +3101,142 @@ function AgentPanel({
         <span>{agentCommands.length} commands</span>
         <span>{authProviderCount} auth flows</span>
         <span>{effectiveModel || "No model"}</span>
+        <span title="Current agent">{selectedAgent ? "Agent: " + selectedAgent : "Agent: build"}</span>
+        <button className="capability-button" onClick={() => setSkillsOpen((v) => !v)} title="Registered skills">
+          <span>{skills.length} skills</span>
+        </button>
+        <button className="capability-button" onClick={() => setReferencesOpen((v) => !v)} title="Project references">
+          <span>{references.length} references</span>
+        </button>
         {providerMenuOpen ? (
           <div className="agent-provider-popover">
             <div>
               <strong>Providers</strong>
               <button className="icon-button tiny" onClick={onRefreshOllama}><RefreshCw size={13} /></button>
             </div>
+            {activeOAuthAttempt ? (
+              <div className="agent-provider-row oauth-attempt">
+                <span>OAuth in progress</span>
+                <small className="oauth-polling">pending...</small>
+                <button className="oauth-cancel" onClick={async () => {
+                  const bridge = api.opencode as any;
+                  if (bridge.oauthAttemptCancel) {
+                    await bridge.oauthAttemptCancel({ projectPath, attemptID: activeOAuthAttempt.attemptID });
+                  }
+                  setActiveOAuthAttempt(null);
+                  setProviderNotice("OAuth cancelled.");
+                }}>Cancel</button>
+              </div>
+            ) : null}
             {(agentProviderState.all.length ? agentProviderState.all : [{ id: "ollama", name: "Ollama", kind: "local" }]).slice(0, 10).map((provider) => {
-              const id = String(provider.id || provider.name || "provider");
+              const id = String((provider as any).id || (provider as any).name || "provider");
+              const providerCreds = providerCredentials[id] || [];
               return (
-                <div key={id} className="agent-provider-row">
-                  <span>{provider.name || provider.label || id}</span>
-                  <small>{connectedProviders.has(id) || id === "ollama" && ollamaOnline ? "connected" : "available"}</small>
-                  <button onClick={() => connectProvider(id)}>
-                    {connectedProviders.has(id) || id === "ollama" && ollamaOnline ? "Manage" : "Connect"}
-                  </button>
+                <div key={id} className="agent-provider-section">
+                  <div className="agent-provider-row">
+                    <span>{(provider as any).name || (provider as any).label || id}</span>
+                    <small>{connectedProviders.has(id) || (id === "ollama" && ollamaOnline) ? "connected" : "available"}</small>
+                    <button onClick={() => connectProvider(id)}>
+                      {connectedProviders.has(id) || (id === "ollama" && ollamaOnline) ? "Manage" : "Connect"}
+                    </button>
+                  </div>
+                  {providerCreds.length > 0 ? (
+                    <div className="agent-credential-list">
+                      {providerCreds.map(function(cred: CredentialInfo) {
+                        return (
+                          <div key={cred.id} className="agent-credential-row">
+                            <span className="cred-label">{cred.label || cred.id.slice(0, 8)}</span>
+                            <span className="cred-type">{cred.type || "key"}</span>
+                            <button className="icon-button tiny" title="Edit label" onClick={async function() {
+                              const newLabel = window.prompt("Credential label", cred.label || "");
+                              if (newLabel !== null && newLabel !== cred.label) {
+                                const bridge = api.opencode as any;
+                                if (bridge.credentialUpdate) {
+                                  await bridge.credentialUpdate({ projectPath, credentialID: cred.id, label: newLabel });
+                                  setProviderCredentials(function(prev) {
+                                    const updated = { ...prev };
+                                    const list = (updated[id] || []).map(function(c) {
+                                      return c.id === cred.id ? { ...c, label: newLabel } : c;
+                                    });
+                                    updated[id] = list;
+                                    return updated;
+                                  });
+                                  setProviderNotice("Credential updated.");
+                                }
+                              }
+                            }}><Settings2 size={12} /></button>
+                            <button className="icon-button tiny danger" title="Delete credential" onClick={async function() {
+                              if (!window.confirm("Delete this credential?")) return;
+                              const bridge = api.opencode as any;
+                              if (bridge.credentialDelete) {
+                                await bridge.credentialDelete({ projectPath, credentialID: cred.id });
+                                setProviderCredentials(function(prev) {
+                                  const updated = { ...prev };
+                                  updated[id] = (updated[id] || []).filter(function(c) { return c.id !== cred.id; });
+                                  return updated;
+                                });
+                                setProviderNotice("Credential deleted.");
+                              }
+                            }}><Trash2 size={12} /></button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               );
             })}
             {providerNotice ? <p className="provider-inline-notice">{providerNotice}</p> : null}
+          </div>
+        ) : null}
+        {skillsOpen ? (
+          <div className="agent-skills-popover">
+            <div className="popover-header">
+              <strong>Skills ({skills.length})</strong>
+              <button className="icon-button tiny" onClick={() => setSkillsOpen(false)}><X size={13} /></button>
+            </div>
+            {skills.length > 0 ? (
+              <div className="skills-list">
+                {skills.map((skill) => (
+                  <div key={skill.id} className="skill-item">
+                    <strong>{skill.name || skill.id}</strong>
+                    {skill.description ? <span>{skill.description}</span> : null}
+                    {skill.source ? <small>Source: {skill.source}</small> : null}
+                    {skill.commands && skill.commands.length > 0 ? (
+                      <div className="skill-commands">
+                        {skill.commands.map((cmd, i) => (
+                          <code key={i}>{cmd}</code>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="empty-state">No skills registered.</span>
+            )}
+          </div>
+        ) : null}
+        {referencesOpen ? (
+          <div className="agent-references-popover">
+            <div className="popover-header">
+              <strong>References ({references.length})</strong>
+              <button className="icon-button tiny" onClick={() => setReferencesOpen(false)}><X size={13} /></button>
+            </div>
+            {references.length > 0 ? (
+              <div className="references-list">
+                {references.map((ref) => (
+                  <div key={ref.id} className="reference-item">
+                    <strong>{ref.title || ref.path || ref.id}</strong>
+                    {ref.path ? <span className="reference-path">{ref.path}</span> : null}
+                    {ref.type ? <small>Type: {ref.type}</small> : null}
+                    {ref.source ? <small>Source: {ref.source}</small> : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="empty-state">No references found.</span>
+            )}
           </div>
         ) : null}
       </div>
@@ -2195,6 +3312,19 @@ function AgentPanel({
         ) : null}
       </div>
 
+      {pendingQuestions.length > 0 ? (
+        <div className="pending-questions-section">
+          {pendingQuestions.filter((q) => q.status !== "replied").map((question) => (
+            <QuestionCard
+              key={question.id}
+              question={question}
+              onReply={(reply) => onReplyToQuestion(question, reply)}
+              onReject={() => onRejectQuestion(question)}
+            />
+          ))}
+        </div>
+      ) : null}
+
       <div className="agent-composer-shell">
         <section className="agent-composer-card">
             <div className="composer-context-line">
@@ -2264,16 +3394,69 @@ function AgentPanel({
             <div className="composer-control-wrap access-wrap">
               <button className="permission-button" title="Agent permission level" onClick={() => openMenu("access")}>
                 <ShieldCheck size={14} />
-                <span>{permissionMode}</span>
+                <span>Permissions</span>
                 <ChevronDown size={13} />
               </button>
               {accessMenuOpen ? (
-                <div className="composer-popover access-menu">
-                  {["Full access", "Ask before edit", "Read only"].map((option) => (
-                    <button key={option} className={permissionMode === option ? "selected" : ""} onClick={() => { setPermissionMode(option); setAccessMenuOpen(false); }}>
-                      <strong>{option}</strong>
-                    </button>
-                  ))}
+                <div className="composer-popover permission-editor">
+                  <div className="permission-editor-header">
+                    <strong>Granular tool permissions</strong>
+                    <small>{Object.values(granularPermissions).filter(v => v === "ask").length} ask, {Object.values(granularPermissions).filter(v => v === "allow").length} allow</small>
+                  </div>
+                  <div className="permission-tool-list">
+                    {TOOL_PERMISSION_GROUPS.map((group) => (
+                      <div key={group.label} className="permission-group">
+                        <div className="permission-group-label">{group.label}</div>
+                        {group.tools.map((toolId) => {
+                          const tool = TOOL_PERMISSIONS.find((t) => t.id === toolId);
+                          if (!tool) return null;
+                          const value = granularPermissions[toolId] || "allow";
+                          return (
+                            <div key={toolId} className="permission-tool-row">
+                              <span className="permission-tool-label">{tool.label}</span>
+                              <div className="permission-toggle-group">
+                                {(["allow", "ask", "deny"] as const).map((opt) => (
+                                  <button
+                                    key={opt}
+                                    className={`permission-toggle-option ${value === opt ? "active" : ""}`}
+                                    onClick={() => setGranularPermissions((prev) => ({ ...prev, [toolId]: opt }))}
+                                  >
+                                    {opt === "allow" ? "Allow" : opt === "ask" ? "Ask" : "Deny"}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                  {savedPermissions.length > 0 ? (
+                    <div className="saved-permissions-section">
+                      <div className="saved-permissions-header">
+                        <strong>Saved permissions</strong>
+                        <small>{savedPermissions.length}</small>
+                      </div>
+                      <div className="saved-permissions-list">
+                        {savedPermissions.map((sp) => (
+                          <div key={sp.id} className="saved-permission-row">
+                            <div className="saved-permission-info">
+                              <span className="saved-permission-action">{sp.rule.action || "any"}</span>
+                              <span className={`saved-permission-effect ${sp.rule.effect}`}>{sp.rule.effect}</span>
+                              {sp.rule.description ? <small>{sp.rule.description}</small> : null}
+                            </div>
+                            <button
+                              className="icon-button tiny danger"
+                              title="Revoke"
+                              onClick={() => onRevokeSavedPermission(sp.id)}
+                            >
+                              <Trash2 size={12} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -2291,6 +3474,28 @@ function AgentPanel({
                   )) : (
                     <button disabled><strong>{ollamaOnline ? "No Ollama models" : "Ollama offline"}</strong></button>
                   )}
+                </div>
+              ) : null}
+            </div>
+            <div className="composer-control-wrap agent-wrap">
+              <button className="model-button" title="Agent" onClick={() => { setAgentMenuOpen((v) => !v); setModelMenuOpen(false); setPlusMenuOpen(false); setAccessMenuOpen(false); }}>
+                <span>{selectedAgent ? "Agent: " + selectedAgent : "Agent: build"}</span>
+                <ChevronDown size={13} />
+              </button>
+              {agentMenuOpen && agentList && agentList.length > 0 ? (
+                <div className="composer-popover agent-menu">
+                  {agentList.map(function(agent: { name: string; mode?: string; description?: string }) {
+                    const isCurrent = agent.name === selectedAgent;
+                    return (
+                      <button key={agent.name} className={isCurrent ? "selected" : ""} onClick={function() {
+                        if (onSwitchAgent) { onSwitchAgent(agent.name); }
+                        setAgentMenuOpen(false);
+                      }}>
+                        <strong>{agent.name}{isCurrent ? " (active)" : ""}</strong>
+                        {agent.description ? <small>{agent.description}</small> : null}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : null}
             </div>
@@ -2371,6 +3576,69 @@ function PermissionRequestCard({
         <button onClick={() => onReply("once")}>Allow once</button>
         <button onClick={() => onReply("always")}>Always</button>
         <button onClick={() => onReply("reject")}>Reject</button>
+      </div>
+    </div>
+  );
+}
+
+function QuestionCard({
+  question,
+  onReply,
+  onReject
+}: {
+  question: AgentQuestion;
+  onReply: (reply: string) => void;
+  onReject: () => void;
+}) {
+  const [replyText, setReplyText] = useState("");
+  const [selectedOption, setSelectedOption] = useState("");
+  return (
+    <div className="agent-question-card">
+      <div className="question-header">
+        <strong>Question</strong>
+        {question.status ? <small>{question.status}</small> : null}
+      </div>
+      <p className="question-text">{question.question}</p>
+      {question.options && question.options.length > 0 ? (
+        <div className="question-options">
+          {question.options.map((option) => (
+            <button
+              key={option}
+              className={"option-button " + (selectedOption === option ? "selected" : "")}
+              onClick={() => {
+                setSelectedOption(option);
+                setReplyText(option);
+              }}
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <textarea
+        className="question-reply-field"
+        value={replyText}
+        onChange={(e) => setReplyText(e.target.value)}
+        placeholder="Type your reply..."
+        rows={2}
+      />
+      <div className="question-actions">
+        <button
+          className="reply-button"
+          disabled={!replyText.trim()}
+          onClick={() => {
+            if (replyText.trim()) {
+              onReply(replyText.trim());
+              setReplyText("");
+              setSelectedOption("");
+            }
+          }}
+        >
+          Reply
+        </button>
+        <button className="reject-button" onClick={() => { onReject(); setReplyText(""); setSelectedOption(""); }}>
+          Reject
+        </button>
       </div>
     </div>
   );
@@ -2695,6 +3963,208 @@ function FileMenu({
       <button onClick={() => run(() => duplicatePath(menu.path))}><Copy size={14} />Duplicate</button>
       <button onClick={() => run(() => copyPath(menu.path))}><Copy size={14} />Copy Path</button>
       <button className="danger" onClick={() => run(() => deletePath(menu.path))}><Trash2 size={14} />Delete</button>
+    </div>
+  );
+}
+
+// ── MCP Server Config Panel ──
+
+type MCPServerEntry = {
+  name: string;
+  type: "stdio" | "sse";
+  command?: string;
+  args?: string[];
+  url?: string;
+  env?: Record<string, string>;
+  disabled?: boolean;
+};
+
+function MCPConfigPanel({
+  mcpConfig,
+  setMcpConfig,
+  mcpDirty,
+  setMcpDirty,
+  projectPath,
+  onSave,
+  onClose
+}: {
+  mcpConfig: { servers: Record<string, any> };
+  setMcpConfig: (config: { servers: Record<string, any> }) => void;
+  mcpDirty: boolean;
+  setMcpDirty: (dirty: boolean) => void;
+  projectPath: string;
+  onSave: () => void;
+  onClose: () => void;
+}) {
+  const servers = mcpConfig.servers || {};
+  const serverNames = Object.keys(servers);
+
+  const addServer = () => {
+    const name = window.prompt("Server name (e.g., filesystem, github)");
+    if (!name) return;
+    const updated = { ...servers, [name]: { type: "stdio", command: "", args: [], env: {}, disabled: false } };
+    setMcpConfig({ ...mcpConfig, servers: updated });
+    setMcpDirty(true);
+  };
+
+  const removeServer = (name: string) => {
+    if (!window.confirm(`Remove MCP server "${name}"?`)) return;
+    const updated = { ...servers };
+    delete updated[name];
+    setMcpConfig({ ...mcpConfig, servers: updated });
+    setMcpDirty(true);
+  };
+
+  const updateServer = (name: string, field: string, value: any) => {
+    const updated = { ...servers, [name]: { ...servers[name], [field]: value } };
+    setMcpConfig({ ...mcpConfig, servers: updated });
+    setMcpDirty(true);
+  };
+
+  const updateEnvVar = (serverName: string, key: string, value: string) => {
+    const env = { ...(servers[serverName]?.env || {}), [key]: value };
+    updateServer(serverName, "env", env);
+  };
+
+  const removeEnvVar = (serverName: string, key: string) => {
+    const env = { ...(servers[serverName]?.env || {}) };
+    delete env[key];
+    updateServer(serverName, "env", env);
+  };
+
+  const addEnvVar = (serverName: string) => {
+    const key = window.prompt("Environment variable name");
+    if (!key) return;
+    const value = window.prompt(`Value for ${key}`) || "";
+    updateEnvVar(serverName, key, value);
+  };
+
+  return (
+    <div className="overlay mcp-editor-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="mcp-editor-panel">
+        <div className="mcp-editor-header">
+          <h2>MCP Server Configuration</h2>
+          <div className="mcp-editor-actions">
+            {mcpDirty ? <span className="mcp-dirty-badge">Unsaved changes</span> : null}
+            <button className="mcp-action-button primary" onClick={onSave} disabled={!mcpDirty}>
+              <Save size={14} /> Save
+            </button>
+            <button className="mcp-action-button" onClick={onClose}>Close</button>
+            <button className="icon-button" onClick={onClose}><X size={18} /></button>
+          </div>
+        </div>
+
+        <div className="mcp-editor-body">
+          <div className="mcp-section-header">
+            <span>MCP Servers ({serverNames.length})</span>
+            <button className="mcp-action-button primary" onClick={addServer}>+ Add Server</button>
+          </div>
+
+          {serverNames.length === 0 ? (
+            <div className="mcp-empty-state">
+              <strong>No MCP servers configured</strong>
+              <span>MCP (Model Context Protocol) servers provide additional tools and data sources for the coding agent.</span>
+              <span>Click "Add Server" to configure a stdio or SSE-based server.</span>
+            </div>
+          ) : (
+            <div className="mcp-server-list">
+              {serverNames.map((name) => {
+                const server = servers[name] || {};
+                const envVars = server.env || {};
+                const envKeys = Object.keys(envVars);
+                return (
+                  <div key={name} className="mcp-server-item">
+                    <div className="mcp-server-header">
+                      <div className="mcp-server-name">
+                        <strong>{name}</strong>
+                        <span className={`mcp-server-status ${server.disabled ? "disabled" : "active"}`}>
+                          {server.disabled ? "Disabled" : "Active"}
+                        </span>
+                        <span className="mcp-server-type">{server.type === "sse" ? "SSE" : "STDIO"}</span>
+                      </div>
+                      <div className="mcp-server-actions">
+                        <button className="icon-button" title="Toggle disabled"
+                          onClick={() => updateServer(name, "disabled", !server.disabled)}>
+                          {server.disabled ? <CirclePlay size={14} /> : <X size={14} />}
+                        </button>
+                        <button className="icon-button danger" title="Remove server"
+                          onClick={() => removeServer(name)}>
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mcp-server-fields">
+                      <div className="mcp-field compact">
+                        <label>Type</label>
+                        <select value={server.type || "stdio"}
+                          onChange={(e) => updateServer(name, "type", e.target.value)}>
+                          <option value="stdio">stdio</option>
+                          <option value="sse">sse</option>
+                        </select>
+                      </div>
+
+                      {server.type !== "sse" ? (
+                        <>
+                          <div className="mcp-field compact">
+                            <label>Command</label>
+                            <input value={server.command || ""}
+                              onChange={(e) => updateServer(name, "command", e.target.value)}
+                              placeholder="e.g., npx, uvx, node" />
+                          </div>
+                          <div className="mcp-field compact">
+                            <label>Args</label>
+                            <input value={(server.args || []).join(" ")}
+                              onChange={(e) => updateServer(name, "args", e.target.value.split(/\s+/).filter(Boolean))}
+                              placeholder="space-separated arguments" />
+                          </div>
+                        </>
+                      ) : (
+                        <div className="mcp-field compact">
+                          <label>URL</label>
+                          <input value={server.url || ""}
+                            onChange={(e) => updateServer(name, "url", e.target.value)}
+                            placeholder="e.g., http://localhost:3000/sse" />
+                        </div>
+                      )}
+
+                      <div className="mcp-field compact">
+                        <label>
+                          Environment Variables ({envKeys.length})
+                          <button className="icon-button tiny" title="Add env var"
+                            onClick={() => addEnvVar(name)}>
+                            <Plus size={12} />
+                          </button>
+                        </label>
+                        {envKeys.length > 0 ? (
+                          <div className="mcp-env-list">
+                            {envKeys.map((key) => (
+                              <div key={key} className="mcp-env-row">
+                                <span className="mcp-env-key">{key}</span>
+                                <input
+                                  value={envVars[key] || ""}
+                                  onChange={(e) => updateEnvVar(name, key, e.target.value)}
+                                  placeholder="value"
+                                />
+                                <button className="icon-button tiny danger"
+                                  onClick={() => removeEnvVar(name, key)}>
+                                  <Trash2 size={11} />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="mcp-env-empty">No environment variables set.</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

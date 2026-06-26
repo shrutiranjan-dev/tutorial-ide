@@ -12,8 +12,8 @@ export type TutorialIdeBridge = {
   };
   opencode: {
     info: () => Promise<{ installed: boolean; version: string; bin: string; command: string }>;
-    providers: () => Promise<Array<{ id: string; label: string; kind: string; command: string }>>;
-    models: (provider?: string) => Promise<CommandResult & { models: string[] }>;
+    providers: (payload?: AgentProjectPayload) => Promise<Array<{ id: string; label: string; kind: string; command: string; auth?: IntegrationAuthMethod[]; connected?: boolean }>>;
+    models: (provider?: string) => Promise<AgentModelInfo[] | (CommandResult & { models: string[] })>;
     syncOllama: (payload: { projectPath: string; models: string[] }) => Promise<{ ok: boolean; path: string; modelCount: number; defaultModel: string }>;
     commands: (payload: AgentProjectPayload) => Promise<AgentCommandInfo[]>;
     providerState: (payload: AgentProjectPayload) => Promise<AgentProviderState>;
@@ -48,6 +48,12 @@ export type TutorialIdeBridge = {
     sessionCommand: (payload: AgentSessionCommandPayload) => Promise<CommandResult>;
     revert: (payload: AgentRevertPayload) => Promise<boolean>;
     unrevert: (payload: AgentSessionPayload) => Promise<boolean>;
+    integrations: (payload: AgentProjectPayload) => Promise<IntegrationInfo[]>;
+    oauthAttemptPoll: (payload: AgentProjectPayload & { attemptID: string }) => Promise<OAuthAttempt | null>;
+    oauthAttemptCancel: (payload: AgentProjectPayload & { attemptID: string }) => Promise<{ ok: boolean }>;
+    credentials: (payload: AgentProjectPayload) => Promise<CredentialInfo[]>;
+    credentialUpdate: (payload: CredentialUpdatePayload) => Promise<{ ok: boolean }>;
+    credentialDelete: (payload: CredentialDeletePayload) => Promise<{ ok: boolean }>;
     onEvent: (callback: (event: AgentRuntimeEvent) => void) => () => void;
   };
   files: {
@@ -538,7 +544,9 @@ export type AgentSessionPayload = AgentProjectPayload & {
 export type AgentSessionStartPayload = AgentProjectPayload & {
   model?: string;
   permissionMode?: string;
+  permissionRules?: PermissionRule[];
   title?: string;
+  agent?: string;
 };
 
 export type AgentSessionStartResult = AgentSessionSummary & {
@@ -564,7 +572,9 @@ export type AgentPromptPayload = AgentProjectPayload & {
   prompt?: string;
   requestId?: string;
   permissionMode?: string;
+  permissionRules?: PermissionRule[];
   planMode?: boolean;
+  agent?: string;
 };
 
 export type AgentShellPayload = AgentProjectPayload & {
@@ -596,6 +606,46 @@ export type AgentRevertPayload = AgentSessionPayload & {
   messageID: string;
   partID?: string;
 };
+
+export interface AgentSessionCompactPayload {
+  projectPath: string;
+  sessionID: string;
+}
+
+export interface AgentSessionStageRevertPayload {
+  projectPath: string;
+  sessionID: string;
+  messageID: string;
+}
+
+export interface AgentSessionClearRevertPayload {
+  projectPath: string;
+  sessionID: string;
+}
+
+export interface AgentSessionCommitRevertPayload {
+  projectPath: string;
+  sessionID: string;
+}
+
+export interface AgentSwitchModelPayload {
+  projectPath: string;
+  sessionID: string;
+  model: string;
+}
+
+export interface AgentSwitchAgentPayload {
+  projectPath: string;
+  sessionID: string;
+  agent: string;
+}
+
+export interface AgentSessionPaginatePayload {
+  projectPath: string;
+  cursor?: string;
+  search?: string;
+  limit?: number;
+}
 
 export type AgentTodoItem = {
   id: string;
@@ -644,7 +694,42 @@ export type AgentRuntimeEvent =
   | { requestId: string; type: "permissions"; sessionID?: string; permissions: AgentPermissionRequest[]; time?: number }
   | { requestId: string; type: "diff"; sessionID?: string; messageID?: string; diff: AgentDiffFile[]; time?: number }
   | { requestId: string; type: "todo"; sessionID?: string; todos: AgentTodoItem[]; time?: number }
-  | { requestId: string; type: "files"; sessionID?: string; file?: string; event?: string; time?: number };
+  | { requestId: string; type: "files"; sessionID?: string; file?: string; event?: string; time?: number }
+  // Session lifecycle
+  | { requestId: string; type: "session.created"; sessionID: string; title?: string; time?: number }
+  | { requestId: string; type: "session.updated"; sessionID: string; time?: number }
+  | { requestId: string; type: "session.deleted"; sessionID: string; time?: number }
+  // Message lifecycle
+  | { requestId: string; type: "message.created"; sessionID: string; messageID: string; time?: number }
+  | { requestId: string; type: "message.done"; sessionID: string; messageID: string; time?: number }
+  // Tool lifecycle
+  | { requestId: string; type: "tool.started"; sessionID: string; tool: string; time?: number }
+  | { requestId: string; type: "tool.finished"; sessionID: string; tool: string; time?: number }
+  | { requestId: string; type: "tool.error"; sessionID: string; tool: string; error: string; time?: number }
+  // Permission lifecycle
+  | { requestId: string; type: "permission.saved"; permissionID: string; time?: number }
+  | { requestId: string; type: "permission.replied"; sessionID?: string; permissionID: string; reply: string; time?: number }
+  // Provider lifecycle
+  | { requestId: string; type: "provider.connected"; providerID: string; time?: number }
+  | { requestId: string; type: "provider.disconnected"; providerID: string; time?: number }
+  | { requestId: string; type: "provider.error"; providerID: string; error: string; time?: number }
+  // Integration lifecycle
+  | { requestId: string; type: "integration.attempt"; attemptID: string; providerID: string; time?: number }
+  | { requestId: string; type: "integration.connected"; providerID: string; time?: number }
+  | { requestId: string; type: "integration.failed"; providerID: string; error: string; time?: number }
+  // Credential lifecycle
+  | { requestId: string; type: "credential.created"; credentialID: string; time?: number }
+  | { requestId: string; type: "credential.deleted"; credentialID: string; time?: number }
+  // Sync lifecycle
+  | { requestId: string; type: "sync.started"; time?: number }
+  | { requestId: string; type: "sync.completed"; time?: number }
+  | { requestId: string; type: "sync.error"; error: string; time?: number }
+  // Error events
+  | { requestId: string; type: "error.internal"; error: string; time?: number }
+  | { requestId: string; type: "error.session"; sessionID: string; error: string; time?: number }
+  | { requestId: string; type: "error.provider"; providerID: string; error: string; time?: number }
+  // Server lifecycle
+  | { requestId: string; type: "server.connected"; time?: number };
 
 export type InterviewTurn = {
   field: string;
@@ -682,3 +767,96 @@ export type InterviewPrompt = {
     exerciseUrl?: string;
   } | null;
 };
+
+// ── Integration / Credential types (v2 Integration API) ──
+
+export interface IntegrationInfo {
+  id: string;
+  name?: string;
+  description?: string;
+  kind?: string;
+  auth?: IntegrationAuthMethod[];
+  connected?: boolean;
+  integrations?: IntegrationInfo[];
+}
+
+export interface IntegrationAuthMethod {
+  type: "oauth" | "key" | "env";
+  label: string;
+  prompts?: string[];
+}
+
+export interface OAuthAttempt {
+  attemptID: string;
+  url?: string;
+  method?: string;
+  status?: string;
+}
+
+export interface CredentialInfo {
+  id: string;
+  integrationID?: string;
+  label?: string;
+  type?: string;
+  createdAt?: string;
+}
+
+export interface CredentialUpdatePayload {
+  projectPath: string;
+  credentialID: string;
+  label: string;
+}
+
+export interface CredentialDeletePayload {
+  projectPath: string;
+  credentialID: string;
+}
+
+// ── Q&A types ──
+
+export interface AgentQuestion {
+  id: string;
+  requestID?: string;
+  sessionID?: string;
+  question: string;
+  options?: string[];
+  metadata?: Record<string, string>;
+  status?: string;
+}
+
+// ── Skills types ──
+
+export interface SkillInfo {
+  id: string;
+  name?: string;
+  description?: string;
+  source?: string;
+  commands?: string[];
+}
+
+// ── References types ──
+
+export interface ReferenceInfo {
+  id: string;
+  path?: string;
+  type?: string;
+  source?: string;
+  title?: string;
+}
+
+// ── Granular permission types ──
+
+export type PermissionEffect = "allow" | "ask" | "deny";
+
+export interface PermissionRule {
+  action?: string;
+  resource?: string;
+  effect: PermissionEffect;
+  description?: string;
+}
+
+export interface SavedPermission {
+  id: string;
+  rule: PermissionRule;
+  createdAt?: string;
+}

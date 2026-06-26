@@ -43,12 +43,57 @@ contextBridge.exposeInMainWorld("tutorialIde", {
     sessionCommand: (payload) => ipcRenderer.invoke("opencode:sessionCommand", payload),
     revert: (payload) => ipcRenderer.invoke("opencode:revert", payload),
     unrevert: (payload) => ipcRenderer.invoke("opencode:unrevert", payload),
+    sessionCompact: (payload) => ipcRenderer.invoke("opencode:sessionCompact", payload),
+    revertStage: (payload) => ipcRenderer.invoke("opencode:revertStage", payload),
+    revertClear: (payload) => ipcRenderer.invoke("opencode:revertClear", payload),
+    revertCommit: (payload) => ipcRenderer.invoke("opencode:revertCommit", payload),
+    modelDetail: (payload) => ipcRenderer.invoke("opencode:modelDetail", payload),
+    providerDetail: (payload) => ipcRenderer.invoke("opencode:providerDetail", payload),
+    sessionSwitchModel: (payload) => ipcRenderer.invoke("opencode:sessionSwitchModel", payload),
+    sessionSwitchAgent: (payload) => ipcRenderer.invoke("opencode:sessionSwitchAgent", payload),
+    agents: (payload) => ipcRenderer.invoke("opencode:agents", payload),
+    integrations: (payload) => ipcRenderer.invoke("opencode:providers", payload),
+    oauthAttemptPoll: (payload) => ipcRenderer.invoke("opencode:oauthAttemptPoll", payload),
+    oauthAttemptCancel: (payload) => ipcRenderer.invoke("opencode:oauthAttemptCancel", payload),
+    credentials: (payload) => ipcRenderer.invoke("opencode:credentials", payload),
+    credentialUpdate: (payload) => ipcRenderer.invoke("opencode:credentialUpdate", payload),
+    credentialDelete: (payload) => ipcRenderer.invoke("opencode:credentialDelete", payload),
+    // Q&A methods
+    questionRequests: (payload) => ipcRenderer.invoke("opencode:questionRequests", payload),
+    sessionQuestions: (payload) => ipcRenderer.invoke("opencode:sessionQuestions", payload),
+    questionReply: (payload) => ipcRenderer.invoke("opencode:questionReply", payload),
+    questionReject: (payload) => ipcRenderer.invoke("opencode:questionReject", payload),
+    // Skills method
+    skills: (payload) => ipcRenderer.invoke("opencode:skills", payload),
+    // References method
+    references: (payload) => ipcRenderer.invoke("opencode:references", payload),
+    // Saved permissions methods
+    savedPermissions: (payload) => ipcRenderer.invoke("opencode:savedPermissions", payload),
+    deleteSavedPermission: (payload) => ipcRenderer.invoke("opencode:deleteSavedPermission", payload),
+    health: (payload) => ipcRenderer.invoke("opencode:health", payload),
+    location: (payload) => ipcRenderer.invoke("opencode:location", payload),
+    // Config methods
+    readConfig: (payload) => ipcRenderer.invoke("opencode:readConfig", payload),
+    writeConfig: (payload) => ipcRenderer.invoke("opencode:writeConfig", payload),
+    engineConfig: (payload) => ipcRenderer.invoke("opencode:engineConfig", payload),
+    engineProviderConfig: (payload) => ipcRenderer.invoke("opencode:engineProviderConfig", payload),
     onEvent: (callback) => {
       const listener = (_event, payload) => callback(payload);
       ipcRenderer.on("opencode:event", listener);
       return () => ipcRenderer.removeListener("opencode:event", listener);
     }
   },
+    // MCP Config methods
+    readMCPConfig: (payload) => ipcRenderer.invoke("opencode:readMCPConfig", payload),
+    writeMCPConfig: (payload) => ipcRenderer.invoke("opencode:writeMCPConfig", payload),
+    // Project copy methods
+    copyProject: (payload) => ipcRenderer.invoke("opencode:copyProject", payload),
+    listProjects: (payload) => ipcRenderer.invoke("opencode:listProjects", payload),
+    // CLI method
+    cli: (payload) => ipcRenderer.invoke("opencode:cli", payload),
+    // MCP Integrations method
+    mcpIntegrations: (payload) => ipcRenderer.invoke("opencode:mcpIntegrations", payload),
+
   lessons: {
     list: () => ipcRenderer.invoke("lessons:list"),
     open: (lessonId) => ipcRenderer.invoke("lessons:open", lessonId),
@@ -106,6 +151,7 @@ contextBridge.exposeInMainWorld("tutorialIde", {
     resize: (terminalId, cols, rows) =>
       ipcRenderer.send("terminal:resize", terminalId, cols, rows),
     stop: (terminalId) => ipcRenderer.send("terminal:stop", terminalId),
+    getEnginePTYToken: (payload) => ipcRenderer.invoke("terminal:engineToken", payload),
     onData: (callback) => {
       const listener = (_event, terminalId, data) => callback(terminalId, data);
       ipcRenderer.on("terminal:data", listener);
